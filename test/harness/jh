@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2046  # $(xflags) is intentionally unquoted (-i or -it)
+# jh -- jaunt harness helper. Run "./jh help".
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+
+usage() { cat <<'EOF'
+jh exec <node> <cmd...>        run cmd in node (a b c relay rtr-a rtr-b rtr-c); -it added if stdin is a tty
+jh sh <node>                   interactive shell (as root); "jh exec a su - jaunt" for the jaunt user
+jh delay <ms> [relay_ms] [loss%]  netem: +ms on every router uplink each way, +relay_ms on relay egress
+                               (default relay_ms=ms). "jh delay 0" clears. RTTs: a<->relay 2ms+r,
+                               direct a<->b 4ms, a->relay->b 4ms+2r.
+jh drop <machine> <seconds> [blackhole|link]
+                               cut the machine's link, then restore. blackhole (default): packets
+                               silently vanish both ways (sendmsg still succeeds). link: interface
+                               down (apps see ENETUNREACH), then up + default route restored.
+jh roam <machine> <lanA|lanB|hard>   move machine to another LAN (new IP, new NAT, same processes)
+jh freeze <machine> <seconds> [pause-only]
+                               simulate suspend: blackhole + docker pause; unpause + restore after.
+jh install <binary> [nodes...] copy a host binary to /opt/jaunt/bin/ (on PATH) in nodes
+                               (default: a b c relay); warns if its libraries do not resolve.
+jh hardmode <cone|symmetric|udpblock|both>   reconfigure router c at runtime
+jh tunnel <machine>            baseline "cloudflared-like" path: machine keeps ssh -R to relay,
+                               exposing its sshd on relay 127.0.0.1:220N (a=1 b=2 c=3)
+jh sshvia <from> <to> [cmd]    ssh from->relay->to (ProxyJump through relay; needs "jh tunnel <to>")
+jh punch <m1> <m2> [port]      UDP simultaneous-open hole punch test via the introducer
+jh whoami <node> [port]        reflexive (post-NAT) address of node as seen by the relay
+jh nat <router>                show the router's conntrack (NAT) table
+jh status                      containers, IPs, attached networks
+EOF
+}
+
+xflags() { if [ -t 0 ] && [ -t 1 ]; then echo -it; else echo -i; fi; }
+mach() { local c; c=$(cname "$1"); case "$c" in "$C_A"|"$C_B"|"$C_C") echo "$c" ;; *) die "$1 is not a machine" ;; esac; }
+lan_if() { # machine -> its lan interface
+  local net; net=$(current_lan_net "$1")
+  ifname_for "$1" "$(case "$net" in "$NET_LANA") echo 10.231.1;; "$NET_LANB") echo 10.231.2;; "$NET_HARD") echo 10.231.3;; esac)"
+}
+lan_gw() { case "$(current_lan_net "$1")" in "$NET_LANA") echo "$LAN_RTRA";; "$NET_LANB") echo "$LAN_RTRB";; "$NET_HARD") echo "$LAN_RTRC";; esac; }
+tunnel_port() { case "$1" in "$C_A") echo 2201;; "$C_B") echo 2202;; "$C_C") echo 2203;; esac; }
+
+blackhole_on() { # container
+  local ifc; ifc=$(lan_if "$1")
+  docker exec "$1" sh -c "tc qdisc replace dev $ifc root netem loss 100% && iptables -I INPUT 1 -i $ifc -m comment --comment jaunt-drop -j DROP"
+}
+blackhole_off() {
+  local ifc; ifc=$(lan_if "$1")
+  docker exec "$1" sh -c "tc qdisc del dev $ifc root 2>/dev/null; while iptables -D INPUT -i $ifc -m comment --comment jaunt-drop -j DROP 2>/dev/null; do :; done; true"
+}
+
+cmd=${1:-help}; shift || true
+case "$cmd" in
+  exec)  n=$(cname "$1"); shift; exec docker exec $(xflags) "$n" "$@" ;;
+  sh)    exec docker exec -it "$(cname "$1")" bash ;;
+  delay)
+    ms=${1:?ms}; rms=${2:-$ms}; loss=${3:-0}
+    for r in $ROUTERS; do
+      for ifc in $(docker exec "$r" sh -c "ls /sys/class/net | grep -v '^lo$'"); do
+        if [ "$ms" = 0 ] && [ "$loss" = 0 ]; then docker exec "$r" tc qdisc del dev "$ifc" root 2>/dev/null || true
+        else docker exec "$r" tc qdisc replace dev "$ifc" root netem delay "${ms}ms" loss "${loss}%"; fi
+      done
+    done
+    if [ "$rms" = 0 ]; then docker exec "$C_RELAY" tc qdisc del dev eth0 root 2>/dev/null || true
+    else docker exec "$C_RELAY" tc qdisc replace dev eth0 root netem delay "${rms}ms"; fi
+    log "delay: routers ${ms}ms each way per uplink (loss ${loss}%), relay egress ${rms}ms" ;;
+  drop)
+    m=$(mach "$1"); s=${2:?seconds}; mode=${3:-blackhole}
+    if [ "$mode" = link ]; then
+      ifc=$(lan_if "$m"); gw=$(lan_gw "$m")
+      docker exec "$m" ip link set "$ifc" down; log "$m link down for ${s}s"; sleep "$s"
+      docker exec "$m" sh -c "ip link set $ifc up && ip route replace default via $gw"
+    else
+      blackhole_on "$m"; log "$m blackholed for ${s}s"; sleep "$s"; blackhole_off "$m"
+    fi
+    log "$m restored" ;;
+  roam)
+    m=$(mach "$1"); read -r net _rtr gw prefix <<<"$(laninfo "${2:?lan}")"
+    cur=$(current_lan_net "$m")
+    [ "$cur" = "$net" ] && { log "$m already on $net"; exit 0; }
+    home=$(case "$m" in "$C_A") echo "$NET_LANA";; "$C_B") echo "$NET_LANB";; "$C_C") echo "$NET_HARD";; esac)
+    if [ "$net" = "$home" ]; then host=100; else host=$(case "$m" in "$C_A") echo 111;; "$C_B") echo 121;; "$C_C") echo 131;; esac); fi
+    docker network disconnect "$cur" "$m"
+    docker network connect --ip "$prefix.$host" "$net" "$m"
+    docker exec "$m" /harness/node/machine.sh "$gw"
+    log "$m roamed $cur -> $net ip=$prefix.$host gw=$gw" ;;
+  freeze)
+    m=$(mach "$1"); s=${2:?seconds}
+    [ "${3:-}" = pause-only ] || blackhole_on "$m"
+    docker pause "$m" >/dev/null; log "$m frozen for ${s}s"; sleep "$s"
+    docker unpause "$m" >/dev/null
+    [ "${3:-}" = pause-only ] || blackhole_off "$m"
+    log "$m thawed" ;;
+  install)
+    bin=${1:?binary}; shift; [ -f "$bin" ] || die "no such file $bin"
+    nodes=${*:-a b c relay}
+    for n in $nodes; do
+      c=$(cname "$n")
+      docker cp -q "$bin" "$c:/opt/jaunt/bin/$(basename "$bin")"
+      docker exec "$c" chmod 755 "/opt/jaunt/bin/$(basename "$bin")"
+      if docker exec "$c" ldd "/opt/jaunt/bin/$(basename "$bin")" 2>&1 | grep -q 'not found'; then
+        log "WARNING: $(basename "$bin") has unresolved libraries in $c"; fi
+    done
+    log "installed $(basename "$bin") into: $nodes" ;;
+  hardmode)
+    mode=${1:?mode}; docker exec "$C_RTRC" /harness/node/router.sh "$WAN_RTRC" 10.231.3 "$mode" "$IP_RELAY" ;;
+  tunnel)
+    m=$(mach "$1"); p=$(tunnel_port "$m")
+    if ! docker exec "$m" pgrep -f "ssh .*-R $p:" >/dev/null; then
+      docker exec -d -u jaunt -w /home/jaunt -e HOME=/home/jaunt "$m" \
+        ssh -N -o ExitOnForwardFailure=yes -R "$p:127.0.0.1:22" relay
+      for _ in 1 2 3 4 5 6 7 8 9 10; do
+        docker exec "$C_RELAY" sh -c "ss -ltn | grep -q 127.0.0.1:$p" && break; sleep 0.5; done
+    fi
+    log "$m sshd reachable at relay:127.0.0.1:$p" ;;
+  sshvia)
+    f=$(mach "$1"); t=$(mach "$2"); shift 2; p=$(tunnel_port "$t")
+    exec docker exec $(xflags) "$f" su - jaunt -c "ssh -tt -J relay -p $p jaunt@127.0.0.1 ${*:-}" ;;
+  punch)
+    m1=$(mach "$1"); m2=$(mach "$2"); port=${3:-40000}; sess=s$RANDOM
+    docker exec "$m1" python3 /harness/node/punch.py "$IP_RELAY:$RENDEZVOUS_PORT" "$sess" "${1}" "$port" & p1=$!
+    docker exec "$m2" python3 /harness/node/punch.py "$IP_RELAY:$RENDEZVOUS_PORT" "$sess" "${2}" "$port" & p2=$!
+    rc=0; wait $p1 || rc=1; wait $p2 || rc=1; exit $rc ;;
+  whoami)
+    c=$(cname "$1"); port=${2:-41000}
+    docker exec "$c" python3 -c "
+import socket;s=socket.socket(2,2);s.bind(('0.0.0.0',$port));s.settimeout(2)
+s.sendto(b'WHOAMI',('$IP_RELAY',$RENDEZVOUS_PORT));print(s.recvfrom(100)[0].decode())" ;;
+  nat)   docker exec "$(cname "$1")" conntrack -L 2>/dev/null ;;
+  status)
+    for c in $CONTAINERS; do
+      docker inspect -f '{{.Name}} {{.State.Status}} {{range $k,$v := .NetworkSettings.Networks}}{{$k}}={{$v.IPAddress}} {{end}}' "$c" 2>/dev/null || echo "/$c absent"
+    done ;;
+  help|-h|--help) usage ;;
+  *) usage; exit 1 ;;
+esac
