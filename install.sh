@@ -18,6 +18,10 @@
 #
 # The download is checked against the release's .sha256 file. A private repository is
 # reached through 'gh release download' when the plain download answers 404.
+# What the checksum does and does not do: it comes from the same place as the binary, so it
+# catches a truncated or corrupted download, not a malicious release or a compromised
+# repository. Downloads are HTTPS only (no plain http://, no redirect to http://);
+# --from-file without a FILE.sha256 installs an unchecked binary (and says so).
 # POSIX sh. Everything is inside main() so a truncated download runs nothing.
 
 main() {
@@ -126,7 +130,7 @@ main() {
 	fi
 	relay_arg=
 	{ [ -n "$RELAY" ] || has_relay; } || relay_arg=" --relay URL"
-	printf '  %s join CODE%s   # CODE from "jaunt link" on a machine in the mesh (on the first machine: jaunt relay set URL; jaunt link)\n' "$J" "$relay_arg"
+	printf '  %s join%s   # then type the code "jaunt link" shows on a machine in the mesh (on the first machine: jaunt relay set URL; jaunt link)\n' "$J" "$relay_arg"
 }
 
 log() { printf '==> %s\n' "$*"; }
@@ -181,17 +185,26 @@ verify() { # verify FILE SUMFILE
 fetch() {
 	if [ -n "${JAUNT_BASE_URL:-}" ]; then
 		base=${JAUNT_BASE_URL%/}
+		case $base in
+		https://* | file://*) ;;
+		*) fail "JAUNT_BASE_URL must be https:// (or file://), not $base" ;;
+		esac
 	elif [ -n "$VERSION" ]; then
 		base=https://github.com/$REPO/releases/download/$VERSION
 	else
 		base=https://github.com/$REPO/releases/latest/download
 	fi
 	command -v curl >/dev/null 2>&1 || fail "curl is needed to download (or use --from-file)"
+	# HTTPS only, redirects included; a file:// base needs the file protocol instead.
+	case $base in
+	file://*) proto='=file' ;;
+	*) proto='=https' ;;
+	esac
 	log "downloading $base/$ASSET"
-	code=$(curl -sS -L --retry 3 --connect-timeout 20 -w '%{http_code}' -o "$TMP/jaunt" "$base/$ASSET") || code=fail
+	code=$(curl -sS -L --proto "$proto" --proto-redir "$proto" --retry 3 --connect-timeout 20 -w '%{http_code}' -o "$TMP/jaunt" "$base/$ASSET") || code=fail
 	case $code in
 	200 | 000) # 000: a file:// URL that worked
-		curl -fsS -L --retry 3 --connect-timeout 20 -o "$TMP/jaunt.sha256" "$base/$ASSET.sha256" ||
+		curl -fsS -L --proto "$proto" --proto-redir "$proto" --retry 3 --connect-timeout 20 -o "$TMP/jaunt.sha256" "$base/$ASSET.sha256" ||
 			fail "cannot download $base/$ASSET.sha256"
 		return 0
 		;;

@@ -18,7 +18,7 @@ What it needs:
 
 Once it runs, on the first machine: `jaunt relay set https://relay.example.net` (every
 other machine gets it through the roster, or from `install.sh --relay URL` /
-`jaunt join CODE --relay URL`). Check it with `jaunt check`; it reports whether the relay
+`jaunt join --relay URL`). Check it with `jaunt check`; it reports whether the relay
 answers and whether UDP address discovery worked.
 
 Files here: `Dockerfile` (builds iroh-relay 1.3.0 from crates.io in debian:12, runs it in
@@ -50,34 +50,27 @@ relayed.
    server --locked`, the same config, and a systemd unit with
    `AmbientCapabilities=CAP_NET_BIND_SERVICE`.
 
-## Option 2: Fly.io (untested)
+## Option 2: Fly.io (not recommended)
 
-Costs: a shared-cpu-1x 256 MB machine, a 1 GB volume for the certificate, and a dedicated
-IPv4 address (needed for UDP), together a few dollars a month. Check Fly's pricing page.
+**Fly.io is not recommended for this relay, and the files here do not make it work.** On
+Fly, UDP reaches an app only on a socket bound to the address of `fly-global-services`
+(inside the machine), and replies must leave from that same socket. iroh-relay 1.3.0
+binds its QUIC address-discovery socket to the literal `quic_bind_addr` in its config; it
+cannot be given a host name. As shipped (`[::]:7842`) the relay gets no UDP on Fly at all,
+so address discovery fails and **every session between machines behind NAT is relayed**.
 
-```sh
-cd deploy/relay
-fly launch --no-deploy --copy-config --name <your-app>   # edit app/primary_region in fly.toml
-fly volumes create relay_certs --size 1
-fly ips allocate-v4                                      # dedicated; shared IPs carry no UDP
-fly deploy
-```
+The only way to bind it there would be a start script that resolves
+`fly-global-services` inside the machine and writes that address into `quic_bind_addr`
+before starting iroh-relay. That is not done here and has not been tried. Community
+reports (Aug–Sep 2026) also describe UDP replies leaving from a different IP and packets
+not arriving, either of which breaks address discovery even when bound correctly, and
+Let's Encrypt through Fly's raw TCP services was not tried either.
 
-Point `relay.example.net` at the dedicated IPv4 (A record) and set `hostname` in
-`relay.toml` before deploying.
-
-What is not known, and why this is not the recommendation:
-
-- Fly delivers UDP only to a socket bound on the `fly-global-services` address, and
-  replies must leave from it. `relay.toml` binds `[::]:7842`. iroh-relay takes an address,
-  not a host name, so the container would need to resolve `fly-global-services` at start
-  and write that address into `quic_bind_addr`. Not done here.
-- Community reports (Aug–Sep 2026) describe UDP replies leaving from a different IP, and
-  packets not arriving. Either breaks address discovery, which means no direct paths.
-- Let's Encrypt through Fly's raw TCP services was not tried.
-
-If you try it: `jaunt check` on two machines behind different NATs, then `jaunt ls`; if
-they stay `relay`, address discovery is not working.
+`fly.toml` is kept as a starting point for someone who wants to do that work (a dedicated
+IPv4, `fly ips allocate-v4`, is needed for UDP at all). If you try it, check it the same
+way as any relay: `jaunt check` on two machines behind different NATs must report that
+UDP address discovery works, and `jaunt ls` must show them `direct`. If they stay
+`relay`, it is not working. Use a VPS (Option 1) instead.
 
 ## Option 3: the desktop, behind the existing Cloudflare tunnel (fallback only)
 
@@ -112,21 +105,25 @@ a mesh with two relays was not tested.
 
 By default anyone who knows the URL can use the relay to reach ids they already know. That
 gives them nothing inside the mesh (every machine refuses keys not in its roster), but it
-lets strangers use your bandwidth. iroh-relay can restrict this with an allowlist of
-machine ids (`[access]` in `relay.toml`; the ids are in `jaunt ls --json`).
+lets strangers use your bandwidth, and it lets anyone occupy a pairing nameplate: pairing
+over an open relay can be denied by anyone who wants to (it fails; nothing leaks, and a
+joining machine never tries the same code twice).
 
-Caveat, untested: pairing (`jaunt link`/`join`) uses a temporary endpoint whose id is not
-in any list, and a new machine's id is not either, so with an allowlist on, linking a new
-machine fails until its id and the temporary one are allowed. Leave access open while
-linking, or do without the allowlist. jaunt does not support the relay's shared-token
-mode yet.
+Leave `[access]` at its default. Do **not** use iroh-relay's id allowlist: pairing
+(`jaunt link`/`join`) needs two temporary endpoints whose ids are random (the joiner's) or
+derived from the code (the inviter's), so no list can name them in advance, and a new
+machine's own id is not known before it links. With an allowlist on, linking new machines
+breaks.
+
+iroh-relay also has a shared-token mode (`access.shared_token`). **jaunt does not support
+it**: jaunt does not send a token to the relay, so with that mode on every jaunt machine is
+refused and nothing connects.
 
 ## What was tested
 
 - The harness (`test/harness/relay.sh`) runs this same iroh-relay 1.3.0 with a manual
   certificate from a throwaway CA and address discovery on; the whole e2e suite runs
   through it, including the relayed path and relay outages.
-- `relay.toml` was parsed by iroh-relay 1.3.0 (with the certificate switched to manual and
-  the `[access]` allowlist uncommented).
+- `relay.toml` was parsed by iroh-relay 1.3.0 (with the certificate switched to manual).
 - Not tested: the Dockerfile build, Let's Encrypt, any real VPS, Fly.io, the Cloudflare
-  tunnel, the allowlist in use.
+  tunnel.

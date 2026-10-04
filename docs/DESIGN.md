@@ -132,7 +132,10 @@ host's side (the tmux session stays).
 ## 6. Linking (pairing)
 
 The ritual: on a machine already in the mesh (or the first machine) run `jaunt link`; it
-shows a code like `4127-tremor-kudos`. On the new machine run `jaunt join 4127-tremor-kudos`.
+shows a code like `4127-tremor-kudos`. On the new machine run `jaunt join` and type the code
+when asked (it is read from the terminal or stdin, not taken from the command line, where
+every local user could read it while the join runs; the command-line form still works and
+warns).
 Both screens show the same sigil and three words; confirm on both; done. The new machine
 receives the roster, and every other machine in the mesh learns of it without being
 touched.
@@ -157,15 +160,24 @@ new cryptography:
    the middle gets exactly one online guess (1 in 60 million); a wrong guess burns the
    code. Codes expire after 5 minutes and work once.
 4. **Sealed exchange.** From the SPAKE2 key, HKDF-SHA256 derives one ChaCha20-Poly1305 key
-   per direction. Each side sends its real id and name; the inviter also sends the roster
-   and fleet settings. A failed open is a wrong code.
+   per direction. Each side sends its real id and name, and an ed25519 signature with its
+   own machine key over a value derived from this session's key (proof that it holds the
+   id it claims; the same key and signature scheme the machine already uses). A failed
+   open is a wrong code; a missing or wrong proof ends the pairing.
 5. **Human check.** Both sides derive a sigil (a small symmetric glyph) and three words
-   from SHA-256 over the SPAKE2 key and both ids, display them, and ask for confirmation.
-   This is a second line in case the PAKE implementation is flawed; it is not the primary
-   defence (without a commitment step a determined attacker could grind a matching sigil),
-   and the docs do not oversell it.
-6. Only after both confirmations (sent sealed) is the roster written, the pairing endpoint
-   closed, and the new entry pushed to the rest of the mesh.
+   from SHA-256 over the SPAKE2 key alone (the key covers the whole SPAKE2 transcript; the
+   ids are bound by the proofs, so no field chosen after the key is known feeds the
+   check), display them, and ask for confirmation. This is a second line in case the PAKE
+   implementation is flawed; it is not the primary defence (without a commitment step a
+   determined attacker with the code could grind SPAKE2 shares for a matching sigil; the
+   three words are the harder part to match), and the docs do not oversell it.
+6. Only after both confirmations (sent sealed) does the inviter send the roster and fleet
+   settings (sealed); the joiner checks them and acknowledges; the inviter writes its
+   roster and says so; then the joiner writes its own. The pairing endpoint is closed and
+   the new entry pushed to the rest of the mesh. If the last message is lost, the joiner
+   simply joins again with a new code (a member that proves its key may link again).
+7. A joining machine tries each code once: whatever went wrong, the same code is not
+   tried again from that machine (a man in the middle would get another guess).
 
 `--yes` skips the confirmation prompt for scripted tests only.
 
@@ -279,12 +291,14 @@ Full research: `docs/research/awake.md`. The design:
 
 `iroh-relay`, unmodified, hosted by the owner. It needs HTTPS (443, its own certificate)
 and UDP 7842 reachable from the internet. `deploy/relay/` contains a Dockerfile, a config
-and step-by-step notes for: a small VPS (recommended), Fly.io (UDP caveats recorded in
-research), and "desktop behind the existing Cloudflare tunnel" as a fallback-only relay
+and step-by-step notes for: a small VPS (recommended), Fly.io (not recommended: its UDP
+needs a bind iroh-relay cannot be configured for as shipped), and "desktop behind the
+existing Cloudflare tunnel" as a fallback-only relay
 (works for relaying, but machines behind NAT will not find direct paths through it).
 Nothing is deployed by this project. The relay sees: which ids are online, from which IP
 addresses, who talks to whom and how much. It cannot read or alter traffic and cannot join
-the mesh. Optional hardening: the relay's own allowlist/token.
+the mesh. The relay's own access control stays open: an id allowlist would break pairing
+(its endpoints have ids nobody knows in advance) and jaunt does not send the relay a token.
 
 ## 11. The look
 

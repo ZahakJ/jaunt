@@ -1,4 +1,6 @@
-# Fly.io app for the jaunt relay. UNTESTED: see README, "Fly.io".
+# Fly.io app for the jaunt relay. NOT RECOMMENDED and not working as shipped: Fly delivers UDP
+# only to a socket bound on the fly-global-services address, and relay.toml binds [::]:7842,
+# so address discovery (direct paths) fails. See README, "Option 2".
 # fly launch --no-deploy --copy-config; fly ips allocate-v4 (dedicated, needed for UDP); fly deploy
 app = "CHANGE-ME-jaunt-relay"
 primary_region = "ams"

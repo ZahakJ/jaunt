@@ -26,15 +26,28 @@ The guard checks every 5 seconds:
 | on battery for 10 s (a shorter cable wiggle is ignored) | the lock is released |
 | on mains but the battery has drained for 60 s (a weak USB-C charger) | treated as battery |
 | a CPU sensor at ≥ 90 °C for 120 s, or any sensor within 5 °C of its critical point | the lock is released, and it **stays released until the lid is opened** |
-| power or temperature cannot be read | the lock is not held: unknown means "sleep" |
+| power or temperature cannot be read, a sensor read hangs for 2 s, or the CPU sensors that were there stop answering | the lock is not held: unknown means "sleep" |
+| released because of the power (battery, weak charger) | taken again only once mains has been steady for a while (20 s to 2 min, depending on how long it was off) |
+
+The durations are counted the way a leaky bucket fills: time in the condition adds up,
+time out of it pays back at half speed. A temperature that dips below 90 °C for one
+sample every two minutes therefore still trips, and a loose cable that flaps between
+battery and mains releases the lock instead of keeping it while mostly on battery.
 | released while the lid is closed (and no dock or second display) | logind normally suspends at once; if the machine is still awake 5 s later, jaunt runs `systemctl suspend` itself, and again a minute later if needed |
 | the daemon crashes, is killed, or hangs | the lock is gone (see below), so logind suspends a closed laptop |
 
 How the lock dies with the daemon: the lock is held by a `systemd-inhibit` child that
 waits on a pipe from the daemon. If the daemon exits in any way, the pipe closes and the
-child exits within milliseconds, so logind drops the lock. If the guard hangs, the daemon
-stops sending systemd's watchdog keep-alive (`WatchdogSec=30` in the unit). systemd then
-kills it, and the lock goes with it.
+child exits within milliseconds, so logind drops the lock.
+
+If something hangs instead: sensor reads run on a helper thread with a 2 s deadline, and a
+reading that does not come back counts as unknown, which releases the lock. If the guard
+thread itself stops ticking for 25 s, the daemon kills the lock holder by its process id
+(with or without systemd), `jaunt host status` says the guard is not answering instead of
+showing the last state, and under systemd the daemon also stops sending the watchdog
+keep-alive (`WatchdogSec=30`), so systemd restarts it. One case is outside jaunt's reach:
+a process stuck in an uninterruptible kernel wait cannot be killed by anyone, but killing
+the holder does not need the stuck thread.
 
 Mains power is detected the way systemd does it. Batteries in mice and keyboards are
 ignored, and USB-C ports that are giving power away do not count as mains. Temperatures

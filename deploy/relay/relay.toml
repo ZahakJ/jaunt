@@ -1,4 +1,5 @@
-# iroh-relay config for a jaunt mesh on a host with a public IP (VPS or Fly.io).
+# iroh-relay config for a jaunt mesh on a host with a public IP (a VPS; see README for why
+# not Fly.io).
 # Replace relay.example.net with your relay's DNS name (an A/AAAA record pointing at it)
 # and the contact address with yours (Let's Encrypt uses it for expiry notices).
 http_bind_addr = "[::]:80"
@@ -17,7 +18,5 @@ contact = "you@example.net"
 prod_tls = true
 cert_dir = "/var/lib/iroh-relay/certs"
 
-# Optional hardening, see README ("Access"). Default: anyone may use the relay to reach
-# ids they already know; it still cannot read or alter traffic.
-# [access]
-# allowlist = ["<machine id>", "<machine id>"]
+# Access stays at its default (everyone). An id allowlist breaks pairing, and jaunt does not
+# send a shared token; see README ("Access"). The relay still cannot read or alter traffic.

@@ -6,16 +6,26 @@ APIs modules consume from each other.
 
 ## Files and paths (`src/paths.rs`)
 
-With `JAUNT_HOME=<dir>` everything lives under it:
-`config/config.toml`, `data/key`, `data/roster.json`, `state/{daemon.log,events.jsonl}`,
-`run/{sock,daemon.lock}`, `config/systemd/user/jaunt.service`. Without it, the XDG paths of
-DESIGN §4 (`$XDG_RUNTIME_DIR/jaunt/sock`, fallback `~/.local/state/jaunt/run/`).
-Directories are 0700, key/roster/config/socket 0600. Writes are atomic (temp + fsync + rename).
+With `JAUNT_HOME=<dir>` (must be absolute) everything lives under it:
+`config/config.toml`, `data/{key,roster.json,daemon.lock}`,
+`state/{daemon.log,events.jsonl,addrs.json,tmux-owners.json}`, `run/sock`,
+`config/systemd/user/jaunt.service`. Without it, the XDG paths of DESIGN §4
+(`$XDG_RUNTIME_DIR/jaunt/sock`, fallback `~/.local/state/jaunt/run/`).
+Directories are 0700 and must be real directories owned by the user (a symlink or a
+foreign owner is refused); key/roster/config/socket and the state files 0600. Writes are
+atomic (temp + fsync + rename). The single-instance lock sits next to the key (one daemon
+per identity even when two contexts disagree about `XDG_RUNTIME_DIR`) and records the
+running daemon's socket path; a client that finds no daemon at its own socket path tries
+the recorded one before starting a daemon. A client only talks to a socket whose directory
+is its own and whose server runs as its uid (`SO_PEERCRED`). A detached daemon's
+`daemon.log` is rotated to `daemon.log.1` past 1 MiB.
 
 `config.toml` keys: `name`, `relays` (bootstrap list), `relay_ca` (PEM path),
-`default_session`, `tmux_socket` (env `JAUNT_TMUX_SOCKET` wins), `portmapper` (default on,
-**off under `JAUNT_HOME`**), `port` (fixed UDP port). `JAUNT_RELAY` (comma list) is used when
-the config has no relays.
+`default_session`, `tmux_socket` (env `JAUNT_TMUX_SOCKET` wins), `portmap` (UPnP / NAT-PMP /
+PCP; **off by default everywhere**, since it changes the owner's router; `portmapper` is
+read as an alias; `jaunt check` mentions it when no peer is direct), `port` (fixed UDP
+port; without it the daemon re-binds the port it used last time when that is free).
+`JAUNT_RELAY` (comma list) is used when the config has no relays.
 
 Relays in effect: the roster's fleet settings once anyone ran `jaunt relay set`, else the
 config's. Fleet relay changes are applied live (`Endpoint::insert_relay/remove_relay`); a
@@ -65,7 +75,8 @@ request per connection. Requests (`IpcRequest`, tagged by `op`):
 | `{"op":"status"}` | `{"kind":"status", ...StatusSnapshot}` |
 | `{"op":"subscribe","history":N}` | `status` snapshot, then up to N past `event`s (oldest first, max 500), then live `event` and `rtt` messages until the client closes; after a lag a fresh `status` |
 | `{"op":"open","target":"fern","service":{...}}` | `{"kind":"opened","peer":{id,name},"path":"direct"\|"relay"\|"unknown","rtt_ms":0.8}` and from then on the socket carries the QUIC stream's frames verbatim (both directions; closing the socket ends the stream); or `{"kind":"error","message":...}` |
-| `{"op":"add_peer","id":"<64 hex>","name":"b"}` | `ok` / `error` (test bootstrap: `jaunt debug add-peer`) |
+| `{"op":"add_peer","id":"<64 hex>","name":"b"}` | `ok` / `error` (test bootstrap: `jaunt debug add-peer`; refused unless the daemon runs under `JAUNT_HOME`) |
+| `{"op":"quiet","id":"<64 hex>"}` | `{"kind":"quiet","quiet_ms":N\|null}`: ms since any datagram (data, acks, keep-alives) arrived from that peer on its live connection; `null` without one. The hop client asks it when typed input has had no answer for 3 s |
 | `{"op":"rename","name":"x"}` | `ok` / `error` |
 | `{"op":"set_relays","relays":["https://..."]}` | `ok` / `error` |
 | `{"op":"shutdown"}` | `ok`, then the daemon exits |
@@ -73,7 +84,7 @@ request per connection. Requests (`IpcRequest`, tagged by `op`):
 
 | `{"op":"link","yes":false}` | a stream of `pair` updates (below); at step `confirm` the daemon waits for `{"op":"pair_answer","accept":true\|false}` on the same socket (not with `yes`); ends with `ok` or `error`. Closing the socket cancels |
 | `{"op":"join","code":"4127-tremor-kudos","relays":[...],"yes":false}` | same conversation as `link` |
-| `{"op":"unlink","target":"c","cascade":false}` | one `told` per other member as it answers, then `unlinked` (report) or `error` |
+| `{"op":"unlink","target":"c","cascade":false,"kill_sessions":false}` | one `told` per other member as it answers, then `unlinked` (report) or `error`. With `kill_sessions`, the tmux sessions the revoked machine created are ended here and, through the `kill_sessions` service, on every member that confirmed (each machine records which peer created which session in `state/tmux-owners.json`, and ends only sessions of machines it has revoked); the report's `tmux_sessions_killed` counts them |
 | `{"op":"leave"}` | `told`s, then `unlinked`; the client then stops the daemon and deletes key and roster |
 
 `target` is resolved by the daemon: exact display name, then unambiguous name prefix, then
@@ -95,9 +106,11 @@ hot`, `will sleep on lid close`); `sessions` is the number of tmux sessions on i
 server (cached 5 s). `StatusSnapshot.host` is this machine's own `HostReport`.
 
 `Event` = `{seq, t_ms, peer?: {id,name}, event: <kind>, ...fields}`; kinds:
-`daemon_started {version}`, `handshake {incoming, path}`, `path_changed {from, to,
+`daemon_started {version}`, `handshake {incoming, path}` (for a connection this machine
+dialled: after its first sync went through), `path_changed {from, to,
 remote_addr}`, `disconnected {reason}`, `dial_failed {error}` (only when the error text
-changes), `sync {changed, outgoing}`, `roster_changed {what}`, `served {service}` (shell/exec
+changes; also, once per streak, when a peer refuses a connection we dialled as "not a
+member", the usual case while a new link spreads), `sync {changed, outgoing}`, `roster_changed {what}`, `served {service}` (shell/exec
 opened here by a peer), `refused {reason}` (a stream from a peer was refused: bad header, version, membership). `rtt` messages: `{"kind":"rtt",
 "peer":"<id>","sample":{t_ms, rtt_ms, path}}` once per second per connected peer; they are
 live-only, not history. Events are also appended to `state/events.jsonl` (rotated at 1 MiB).
@@ -120,7 +133,7 @@ locally or by sync; `added` = members it added, still linked), `told {ok, detail
 | `rendezvous` | | the two temporary endpoints are connected (unauthenticated) |
 | `key_exchange` | | SPAKE2 done (a wrong code shows only at the next step) |
 | `sealed` | `other {id,name}` | real ids and names opened under the PAKE key: the code was right |
-| `confirm` | `other, sigil[5 strings of 5 '#'/'.'], hue 0..5, words[3]` | show them; ask the human |
+| `confirm` | `other, sigil[5 strings of 5 '#'/'.'], hue 0..5, words[3]` | show them; ask the human (the event history keeps `other` only, not the sigil and words) |
 | `confirmed` | `here: bool` | one side said yes (both arrive before `linked`) |
 | `linked` | `other, members` | both said yes; the roster is written on this side |
 | `fan_out` | `machine {id,name}, ok, detail` | inviter: one other member's acknowledgement of the new entry |
@@ -142,7 +155,25 @@ way to see the stream.
   The after-handshake hook admits only current members (raw 32-byte ids); every stream
   re-checks membership.
 - One keeper task per member: dial if no live connection, then wait 30 s / a roster change /
-  a kick (2 s after a loss). A dial is `id + every relay URL`.
+  a kick (2 s after a loss; 1 s after a "not a member" refusal, for the first 15). A dial
+  is `id + every relay URL + the peer's last working direct addresses` (`state/addrs.json`,
+  at most 4 per peer, saved whenever a direct path's address is new). The addresses are
+  only hints: the peer is still authenticated by its key, so a stale one costs a failed
+  attempt. With them, and with the daemon re-binding its last UDP port (so its NAT
+  mapping and the address the others remember stay the same), a restarted daemon finds a
+  peer on the same direct path while the relay is down.
+- Every adopted connection is tracked per peer until it closes; a revocation closes all of
+  them. A new connection from a peer replaces (and closes) any older one except inside the
+  simultaneous-dial race below.
+- **Settling (H1).** After an absence (daemon start; the 1 s monitor not having run for 5 s,
+  i.e. a freeze or suspend; or no authenticated contact with any member for 60 s, where
+  contact is a sync either way or a ping answered or served) the daemon serves Sync and
+  Ping only until it has tried to sync with every other member: all attempts finished
+  (each retried with a fresh dial while time is left) or 5 s passed. Then it re-checks the
+  requester's membership, so a machine that was revoked while this one was away is refused
+  as soon as any informed member is reachable. Requests wait (up to 8 s) rather than fail.
+- Every served stream (shell, exec, tcp, copy) ends when its peer stops being a member,
+  besides the process kills below.
 - Every adopted connection (either direction) accepts streams, samples the selected path
   every second, pings every 10 s. The dialler runs Sync on every new connection; any roster
   change (local or merged) is pushed to every connected peer.
@@ -159,8 +190,14 @@ way to see the stream.
 `entries{id → {id, name, added_at, added_by, named_at}}`, `tombstones{id → {id,
 revoked_at, revoked_by}}`, `fleet {relays, updated_at, updated_by}`. Merge: entries by max
 `(named_at, name, added_at, added_by)`, tombstones by min `(revoked_at, revoked_by)`, fleet
-by max `(updated_at, updated_by, relays)`; a tombstone beats any entry. Limits: 256 entries,
-4096 tombstones, 8 relays, names `[a-z0-9-]{1,32}`. Same-name machines display as
+by max `(updated_at, updated_by, relays)`; a tombstone beats any entry. Limits: 256
+members, 1024 entries (revoked machines' entries count here, not as members), 512
+tombstones for ids without an entry (a tombstone for a known id is always taken), 8
+relays, names `[a-z0-9-]{1,32}`. A roster from a peer is merged item by item
+(`merge_bounded`): malformed entries (bad name, id not an ed25519 key) are dropped
+singly, tombstones go first, and only new items past the limits are skipped, so a full or
+junk-stuffed roster never blocks a revocation. A merge that still fails is refused in
+words (`sync refused: ...`), which `unlink` reports as such. Same-name machines display as
 `name` (earliest added) and `name-<4 hex of id>`. `revoke()` exists for the unlink stage.
 
 ## Pairing (`src/pair/`)
@@ -174,18 +211,28 @@ SPAKE2 (`spake2` 0.4, Ed25519, `start_a` inviter / `start_b` joiner, identities
 `jaunt-inviter` / `jaunt-joiner`, password = the canonical code); per-direction keys =
 HKDF-SHA256(salt `jaunt/pair/1`, ikm = SPAKE2 key, info `jaunt/pair/1/inviter-to-joiner` /
 `.../joiner-to-inviter`); ChaCha20-Poly1305 with a counter nonce per direction; check =
-SHA-256(`jaunt/pair/1/check` ‖ key ‖ inviter id ‖ joiner id) → sigil (15 bits, mirrored 5×5),
-hue, three EFF words. `flow.rs`: the conversation on one stream (diagram in the file):
-joiner `spake` → inviter `spake` → joiner sealed `{id,name}` → inviter sealed
-`{id,name,roster,your_entry}` → both sealed `{ok}`. Plain `{t:"abort",reason}` frames carry
-refusals (wrong code, revoked key, already linked); they are unauthenticated courtesy.
+SHA-256(`jaunt/pair/2/check` ‖ key) → sigil (15 bits, mirrored 5×5), hue, three EFF words
+(the key alone: a claimed id, chosen after the key is known, must not feed it); proof of
+key = ed25519 signature by the machine key over `jaunt/pair/2/proof/<role>` ‖
+HKDF-SHA256(salt `jaunt/pair/1`, ikm = key, info `jaunt/pair/2/proof`), checked against
+the claimed id (which must be a valid ed25519 key). `flow.rs` (pairing version 2): the
+conversation on one stream (diagram in the file): joiner `spake` → inviter `spake` →
+joiner sealed `{id,name,proof}` → inviter sealed `{id,name,proof}` → both sealed `{ok}` →
+inviter sealed `{roster,your_entry}` → joiner sealed `done{ok}` → inviter writes its roster,
+sealed `done{ok}` → joiner writes its roster. The roster reaches the joiner only after both
+humans said yes. Plain `{t:"abort",reason}` frames carry refusals (wrong code, revoked
+key); they are unauthenticated courtesy and are shown only cleaned of control characters,
+cut to 200 characters and marked "not verified". A member that proves its key may link
+again (how a pairing whose last message was lost is finished).
 `mod.rs`: the inviter's temporary endpoint (ALPN `jaunt-pair/1`, accepts any remote, no
-port mapping) lives until the code's single attempt or its 5 minutes; a connection that
-never sends the first message does not use up the code; the first SPAKE message burns it.
-The joiner dials from a throwaway random key and sends its real id only sealed. Roster
-writes happen only after both `ok`s: the inviter merges the joiner's entry
-(`added_by` = inviter), the joiner replaces its roster with the inviter's plus that entry.
-`join` refuses on a machine that already has other members (use `leave` first). If the
+port mapping) lives until the code's single attempt or its 5 minutes; incoming connections
+are handled side by side (up to 16) until one sends a well-formed first message, so one
+that never speaks holds up nobody and does not use up the code; the first SPAKE message
+burns it. The joiner dials from a throwaway random key and sends its real id only sealed;
+it records each code it sends a first message for (as a hash, 5 minutes) and never tries
+the same code again. The client reads the code from the terminal or stdin (`jaunt join`
+with no argument); a code given on the command line works but warns that the process list
+shows it. `join` refuses on a machine that already has other members (use `leave` first). If the
 fleet relay list was never set, `link` sets it from the inviter's relays so the joiner
 receives it. A `join` on a machine whose daemon runs without a relay saves the relay to
 config and restarts the daemon. No LAN pairing without a relay: stage 1 has no mDNS.
@@ -210,14 +257,15 @@ use `max(now, previous + 1)` with saturation. A machine whose own id is tombston
 nobody. Accepted by design (flat trust): any member may tombstone any other, including the
 receiver.
 
-**Window for a machine that was away during an unlink.** It accepts the revoked machine
-until it syncs with any member that knows. Every daemon dials every member when a
-connection is lost (after 2 s) and every 30 s, and the dialler syncs first, so the window
-is roughly "time until it reaches an informed member" — measured in the harness
-(`03-unlink.sh`, b frozen 45 s): b learned 2 s and 6 s after thawing in two runs; in the
-first run the revoked machine did get one command through to b inside the window. Closing
-it fully would need a machine to sync with another member before serving anyone after a
-long absence; not done.
+**Window for a machine that was away during an unlink.** A machine back from an absence
+serves no shell, command, port or copy until it has tried to sync with every other member
+(settling, above), so as long as any informed member is reachable the revoked machine
+cannot get in first: `03-unlink.sh` freezes b for 45 s while a unlinks c, then has c run a
+command on b five times the moment b thaws; none gets through. **What is left:** if no
+informed member is reachable within the 5 s settling bound (the others offline, or the
+relay down and no direct path), the machine serves the revoked one until it next syncs
+with an informed member (every 30 s it retries, and on every reconnect). The same holds
+for a machine that never left: it learns of a revocation by the push, or by its next sync.
 
 ## `jaunt check` (`src/check.rs`)
 
@@ -238,11 +286,23 @@ The daemon is never started by `check`.
 
 - Auto-start: if the socket does not answer, `jaunt` starts `jaunt daemon` detached
   (`setsid`, log to `state/daemon.log`) or `systemctl --user start jaunt` if the unit is
-  installed and `JAUNT_HOME` is unset.
+  installed and `JAUNT_HOME` is unset. The detached daemon runs in `$HOME` (not the
+  directory the command ran in) with an allowlisted environment (HOME, USER, LOGNAME,
+  SHELL, LANG, LC_*, TZ, XDG_*, DBUS_SESSION_BUS_ADDRESS, TMUX_TMPDIR, JAUNT_*) and a PATH
+  of absolute directories only; every daemon, however started, also leaves its start
+  directory and drops empty or relative PATH entries, so no helper (tmux,
+  systemd-inhibit, busctl, systemctl) is found relative to a directory.
 - Hop (`src/shell.rs`, `src/term.rs`): raw mode restored on drop, on panic (hook) and on
   SIGTERM/SIGHUP; SIGWINCH → `Resize`; `Enter ~ .` / `Enter ~ ?` / `~~`; when the stream
   dies the client keeps the terminal, shows one status line and retries with backoff
-  1–10 s; `~.` gives up during retry too.
+  1–10 s; `~.` gives up during retry too. While the stream is up, typed input that has
+  had no output back for 3 s makes the client ask the daemon (`quiet`) whether anything at
+  all (data, acks, keep-alives) arrived from the machine in the last 3 s; if not, the
+  bottom row shows `fern ╌ no answer for Ns · waiting for the link · ~. to give up` until
+  output arrives (then the remote screen is redrawn). A quiet program (a password prompt)
+  on a live link shows nothing.
+- Strings from other machines (refusal reasons, ping facts, notices, abort reasons, error
+  messages) are printed without control characters (`term::safe_text`).
 - UI (`src/ui/`): drawn by hand on a cell grid (`canvas.rs`, per-cell diffs, synchronized
   updates), no TUI crate. `theme.rs` picks the colour mode (`JAUNT_COLOR=truecolor|16|none`
   forces one; `NO_COLOR`/`--no-color`; off a terminal no escapes at all) and the glyph set
@@ -289,7 +349,15 @@ The daemon is never started by `check`.
   argv/env limits, key file permissions; pairing: codes and forgiving entry, wrong code
   (fails both sides, burns), expiry and single use, replayed first messages, a
   man-in-the-middle with the nameplate (one guess, opens nothing), tampered sealed
-  payload, reflection/reordering, a "no" on either side, a revoked joiner.
+  payload, reflection/reordering, a "no" on either side, a revoked joiner, a code holder
+  claiming an invalid or someone else's key (refused), no roster before both confirmed, a
+  forged inviter id (refused), abort reasons cleaned and cut, an existing member linking
+  again, the joiner trying a code once; roster: bounded merge equals merge below the
+  limits, a junk-stuffed full roster never blocks a tombstone, malformed items dropped
+  singly; host mode: heat dipping for one sample still trips, a flapping cable and an
+  alternating weak charger release, a hung sensor read (a FIFO) releases, lost CPU
+  sensors are unknown heat; local: uninstall removes only jaunt's files, the daemon's
+  PATH and environment, systemd unit quoting, settling's absence rule, address hints.
 - `test/e2e/00-host.sh`: two daemons on the host (JAUNT_HOME under `target/tmp`, dev relay
   on 127.0.0.1, tmux `-L jaunt-test`), run, events, and a pty hop that survives SIGTERM and
   SIGKILL restarts of the remote daemon.
@@ -297,8 +365,13 @@ The daemon is never started by `check`.
   capitals), identical sigils, wrong code fails and burns, c joins through b, a learns of c,
   all connected, pairing events present and free of the code words.
 - `test/e2e/03-unlink.sh`: harness: c's shell and command on b ended by `a unlink c`, c
-  refused by a and b, cannot come back by syncing or by pairing with its old key; a frozen b
-  learns of a later unlink on return (window printed).
+  refused by a and b, cannot come back by syncing or by pairing with its old key; with b
+  frozen for 60 s, `a unlink c --kill-sessions` ends the session c created on a and prints
+  the reminder; the moment b thaws c sends five commands to b and none gets through
+  (with the build before settling, all five did); b learns of the unlink (time printed).
+- `test/e2e/06-paths.sh` also asserts that a daemon restarted while the relay is down is
+  reached again on the direct path (address hints), and `05-continuity.sh`'s driver
+  reports for each disruption whether the stall line was shown.
 - `test/e2e/04-09`, `run-all.sh` (stage 3): hop, onward hop and re-hop; continuity through
   link drops, roams, freezes and a daemon restart; paths (hard NAT modes, relay down and
   back); services (run, cp, fwd, pipe + OpenSSH, throughput); no-contact audit from outside
