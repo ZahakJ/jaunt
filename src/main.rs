@@ -1,12 +1,15 @@
 //! jaunt: hop between your own machines.
 
 mod check;
+mod children;
+mod cli_trust;
 mod config;
 mod daemon;
 mod events;
 mod identity;
 mod ipc;
 mod net;
+mod pair;
 mod paths;
 mod proto;
 mod pty;
@@ -15,6 +18,7 @@ mod services;
 mod shell;
 mod systemd;
 mod term;
+mod trust;
 mod ui;
 
 use std::io::Write;
@@ -61,6 +65,36 @@ enum Cmd {
     },
     /// Rename this machine.
     Name { name: String },
+    /// Invite a machine into the mesh: shows a code for 'jaunt join' on the new machine.
+    Link {
+        /// Skip comparing the sigil (scripted tests only).
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Join a mesh with the code another machine's 'jaunt link' shows.
+    Join {
+        /// The code, e.g. 4127-tremor-kudos (spaces instead of dashes are fine).
+        #[arg(required = true, num_args = 1..)]
+        code: Vec<String>,
+        /// Relay URL, when this machine does not know one yet.
+        #[arg(long)]
+        relay: Option<String>,
+        /// Skip comparing the sigil (scripted tests only).
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Revoke a machine: it is refused everywhere from now on and its sessions end.
+    Unlink {
+        name: String,
+        /// Also revoke every machine it added.
+        #[arg(long)]
+        cascade: bool,
+    },
+    /// Take this machine out of the mesh and wipe its key and roster.
+    Leave {
+        #[arg(long)]
+        yes: bool,
+    },
     /// Show or set the relay(s) every machine uses.
     Relay {
         #[command(subcommand)]
@@ -189,13 +223,17 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Some(Cmd::Relay { action }) => relay(&paths, action).await,
+        Some(Cmd::Link { yes }) => cli_trust::link(&paths, yes).await,
+        Some(Cmd::Join { code, relay, yes }) => cli_trust::join(&paths, code, relay, yes).await,
+        Some(Cmd::Unlink { name, cascade }) => cli_trust::unlink(&paths, name, cascade).await,
+        Some(Cmd::Leave { yes }) => cli_trust::leave(&paths, yes).await,
         Some(Cmd::Check) => Ok(if check::run(&paths).await? > 0 { 1 } else { 0 }),
         Some(Cmd::Reset { yes }) => reset(&paths, yes).await,
         Some(Cmd::Debug { action }) => debug(&paths, action).await,
     }
 }
 
-async fn status(paths: &Paths) -> Result<proto::StatusSnapshot> {
+pub(crate) async fn status(paths: &Paths) -> Result<proto::StatusSnapshot> {
     match ipc::call(paths, &IpcRequest::Status).await? {
         IpcResponse::Status(s) => Ok(s),
         IpcResponse::Error { message } => bail!("{message}"),
@@ -217,7 +255,7 @@ async fn ls(paths: &Paths, json: bool) -> Result<i32> {
     Ok(0)
 }
 
-async fn stop_daemon(paths: &Paths) -> Result<bool> {
+pub(crate) async fn stop_daemon(paths: &Paths) -> Result<bool> {
     let Some(mut s) = ipc::connect_existing(paths).await else { return Ok(false) };
     ipc::send_request(&mut s, &IpcRequest::Shutdown).await?;
     for _ in 0..50 {
@@ -291,17 +329,34 @@ async fn reset(paths: &Paths, yes: bool) -> Result<i32> {
             return Ok(1);
         }
     }
-    stop_daemon(paths).await?;
-    identity::remove(paths)?;
-    match std::fs::remove_file(paths.roster_file()) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e.into()),
+    // Best effort: while this machine is still a member, revoke its old key everywhere
+    // reachable, so a copy of that key (a stolen disk) is worthless too.
+    if ipc::connect_existing(paths).await.is_some()
+        && let Ok(s) = status(paths).await
+        && !s.peers.is_empty()
+        && !s.revoked.iter().any(|r| r.id == s.me.id)
+    {
+        println!("revoking this machine's old key on the others first");
+        if let Err(e) = cli_trust::announce_leave(paths).await {
+            println!("could not tell the others ({e:#}); unlink this machine's old key from one of them");
+        }
     }
+    wipe_identity(paths).await?;
     let key = identity::create(paths)?;
     println!("new identity: {}", key.public());
     println!("link this machine again from one already in the mesh");
     Ok(0)
+}
+
+/// Stop the daemon and delete the key and roster.
+pub(crate) async fn wipe_identity(paths: &Paths) -> Result<()> {
+    stop_daemon(paths).await?;
+    identity::remove(paths)?;
+    match std::fs::remove_file(paths.roster_file()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 async fn debug(paths: &Paths, action: DebugCmd) -> Result<i32> {

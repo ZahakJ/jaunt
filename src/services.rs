@@ -68,6 +68,7 @@ pub async fn serve_exec(d: &Arc<Daemon>, from: MachineId, argv: Vec<String>, mut
         }
     };
     let pid = child.id().and_then(|p| rustix::process::Pid::from_raw(p as i32));
+    let _ticket = d.children.track(from, pid);
 
     // stdout and stderr readers feed one writer (the stream), tagged by frame type.
     let (out_tx, mut out_rx) = mpsc::channel::<(FrameType, Vec<u8>)>(16);

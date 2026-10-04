@@ -96,6 +96,13 @@ async fn handle(d: Arc<Daemon>, mut s: UnixStream) -> Result<()> {
         }
         IpcRequest::Rename { name } => reply(&mut s, &result(d.rename(&name))).await,
         IpcRequest::SetRelays { relays } => reply(&mut s, &result(d.set_relays(relays))).await,
+        IpcRequest::Link { yes } => crate::pair::serve_ipc(d, s, crate::pair::Request::Link, yes).await,
+        IpcRequest::Join { code, relays, yes } => crate::pair::serve_ipc(d, s, crate::pair::Request::Join { code, relays }, yes).await,
+        IpcRequest::PairAnswer { .. } => {
+            reply(&mut s, &IpcResponse::Error { message: "no link or join is waiting for an answer on this connection".into() }).await
+        }
+        IpcRequest::Unlink { target, cascade } => crate::trust::serve_ipc(d, s, crate::trust::Request::Unlink { target, cascade }).await,
+        IpcRequest::Leave => crate::trust::serve_ipc(d, s, crate::trust::Request::Leave).await,
         IpcRequest::Shutdown => {
             reply(&mut s, &IpcResponse::Ok { message: "daemon stopping".into() }).await?;
             d.shutdown();

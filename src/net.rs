@@ -14,7 +14,7 @@ use iroh::endpoint::{
 };
 use iroh::{Endpoint, EndpointAddr, RelayMode, RelayUrl, SecretKey, TransportAddr};
 
-use crate::proto::{ALPN, PathKind};
+use crate::proto::{ALPN, PAIR_ALPN, PathKind};
 use crate::roster::MachineId;
 
 pub const KEEP_ALIVE: Duration = Duration::from_secs(5);
@@ -106,8 +106,9 @@ pub fn parse_relays(list: &[String]) -> Result<Vec<RelayUrl>> {
         .collect()
 }
 
-pub async fn build_endpoint(o: EndpointOptions<'_>) -> Result<Endpoint> {
-    let relay_mode = if o.relays.is_empty() { RelayMode::Disabled } else { RelayMode::custom(o.relays.iter().cloned()) };
+/// Builder settings shared by the machine endpoint and the pairing endpoints.
+fn base_builder(relays: &[RelayUrl], relay_ca: Option<&Path>, portmapper: bool) -> Result<iroh::endpoint::Builder> {
+    let relay_mode = if relays.is_empty() { RelayMode::Disabled } else { RelayMode::custom(relays.iter().cloned()) };
     let transport = QuicTransportConfig::builder()
         .keep_alive_interval(KEEP_ALIVE)
         .max_idle_timeout(Some(IDLE_TIMEOUT.try_into()?))
@@ -117,7 +118,7 @@ pub async fn build_endpoint(o: EndpointOptions<'_>) -> Result<Endpoint> {
     let mut net_report = NetReportConfig::minimal();
     net_report.https_probes = true;
     let mut b = Endpoint::builder(presets::Minimal);
-    if let Some(ca) = o.relay_ca {
+    if let Some(ca) = relay_ca {
         use rustls_pki_types::{CertificateDer, pem::PemObject};
         let certs = CertificateDer::pem_file_iter(ca)
             .with_context(|| format!("cannot read relay CA {}", ca.display()))?
@@ -125,22 +126,39 @@ pub async fn build_endpoint(o: EndpointOptions<'_>) -> Result<Endpoint> {
             .with_context(|| format!("cannot parse relay CA {}", ca.display()))?;
         b = b.ca_tls_config(iroh::tls::CaTlsConfig::custom_roots(certs));
     }
+    Ok(b.dns_resolver(iroh::dns::DnsResolver::custom(OsResolver))
+        .relay_mode(relay_mode)
+        .transport_config(transport)
+        .portmapper_config(if portmapper { PortmapperConfig::default() } else { PortmapperConfig::Disabled })
+        .net_report_config(net_report))
+}
+
+pub async fn build_endpoint(o: EndpointOptions<'_>) -> Result<Endpoint> {
+    let mut b = base_builder(o.relays, o.relay_ca, o.portmapper)?;
     if let Some(port) = o.port {
         b = b.bind_addr(SocketAddr::from(([0, 0, 0, 0], port)))?;
     }
     let ep = b
-        .dns_resolver(iroh::dns::DnsResolver::custom(OsResolver))
         .secret_key(o.secret)
-        .relay_mode(relay_mode)
         .alpns(vec![ALPN.to_vec()])
-        .transport_config(transport)
-        .portmapper_config(if o.portmapper { PortmapperConfig::default() } else { PortmapperConfig::Disabled })
-        .net_report_config(net_report)
         .hooks(Allowlist(o.members))
         .bind()
         .await
         .context("cannot start the network endpoint")?;
     Ok(ep)
+}
+
+/// A short-lived endpoint for pairing (DESIGN §6). It speaks only `jaunt-pair/1`, accepts
+/// any remote (the PAKE is the authentication), and never asks the gateway for a mapping.
+/// `accept` = it is the inviter's rendezvous endpoint; the joiner's only dials.
+pub async fn build_pair_endpoint(secret: SecretKey, relays: &[RelayUrl], relay_ca: Option<&Path>, accept: bool) -> Result<Endpoint> {
+    let alpns = if accept { vec![PAIR_ALPN.to_vec()] } else { Vec::new() };
+    base_builder(relays, relay_ca, false)?
+        .secret_key(secret)
+        .alpns(alpns)
+        .bind()
+        .await
+        .context("cannot start the pairing endpoint")
 }
 
 /// What to dial for a peer: its id plus every relay (no address lookup exists).

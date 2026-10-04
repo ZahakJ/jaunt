@@ -11,6 +11,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::roster::MachineId;
 
 pub const ALPN: &[u8] = b"jaunt/1";
+/// Spoken only on the temporary pairing endpoints (DESIGN §6).
+pub const PAIR_ALPN: &[u8] = b"jaunt-pair/1";
 pub const PROTO_VERSION: u32 = 1;
 pub const MAX_FRAME: usize = 1 << 20;
 pub const MAX_HEADER: usize = 64 * 1024;
@@ -306,6 +308,32 @@ pub enum IpcRequest {
     SetRelays { relays: Vec<String> },
     /// Ask the daemon to exit. -> `Ok`
     Shutdown,
+    /// Invite a machine (§6). -> a stream of `Pair` updates on this socket; at step
+    /// `confirm` the daemon waits for a `PairAnswer` frame from the client (unless `yes`);
+    /// ends with `Ok` or `Error`. Closing the socket cancels the pairing.
+    Link {
+        #[serde(default)]
+        yes: bool,
+    },
+    /// Join a mesh with a code. Same conversation as `Link`.
+    Join {
+        code: String,
+        #[serde(default)]
+        relays: Vec<String>,
+        #[serde(default)]
+        yes: bool,
+    },
+    /// The local human's answer at the `confirm` step (sent on a `Link`/`Join` socket).
+    PairAnswer { accept: bool },
+    /// Revoke a machine (§7). -> `Told` per machine, then `Unlinked`; or `Error`.
+    Unlink {
+        target: String,
+        #[serde(default)]
+        cascade: bool,
+    },
+    /// Tombstone this machine and tell the others. -> `Told`s, then `Unlinked`. The client
+    /// then stops the daemon and wipes the key and roster.
+    Leave,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -317,6 +345,69 @@ pub enum IpcResponse {
     Opened { peer: PeerRef, path: PathKind, rtt_ms: Option<f64> },
     Ok { message: String },
     Error { message: String },
+    /// Progress of a pairing ritual.
+    Pair(PairUpdate),
+    /// One machine's answer to a pushed roster change (link fan-out, unlink, leave).
+    Told { peer: PeerRef, ok: bool, detail: String },
+    /// Result of `Unlink` / `Leave`.
+    Unlinked(UnlinkReport),
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PairRole {
+    Inviter,
+    Joiner,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PairUpdate {
+    pub role: PairRole,
+    #[serde(flatten)]
+    pub step: PairStep,
+}
+
+/// The steps of the ritual, in order. `fan_out` repeats once per machine told.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "step", rename_all = "snake_case")]
+pub enum PairStep {
+    /// Inviter: the code is live. `first_machine` = this machine's mesh is just itself.
+    Waiting { code: String, expires_at_ms: u64, relays: Vec<String>, first_machine: bool },
+    /// Joiner: dialling the pairing endpoint.
+    Dialing { relays: Vec<String> },
+    /// The two pairing endpoints are connected (nothing is authenticated yet).
+    Rendezvous,
+    /// SPAKE2 finished (a wrong code is only detected at the next step).
+    KeyExchange,
+    /// Real ids and names were exchanged under the PAKE key: the code was right.
+    /// (Fields are not called `peer`: that name belongs to the enclosing event.)
+    Sealed { other: PeerRef },
+    /// Show these on both screens and ask the human. `sigil` is 5 rows of 5 cells,
+    /// `#` = filled, `.` = empty, mirror-symmetric; `hue` 0..6 is a colour hint.
+    Confirm { other: PeerRef, sigil: Vec<String>, hue: u8, words: Vec<String> },
+    /// One side said yes. `here` = this machine's human.
+    Confirmed { here: bool },
+    /// Both said yes; the roster is written here.
+    Linked { other: PeerRef, members: usize },
+    /// Inviter: one other machine's acknowledgement of the new entry.
+    FanOut { machine: PeerRef, ok: bool, detail: String },
+    /// Inviter: every other machine was tried.
+    FanOutDone { told: usize, not_yet: usize },
+    Failed { reason: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct UnlinkReport {
+    /// Machines tombstoned by this request.
+    pub revoked: Vec<PeerRef>,
+    /// Machines that answered with a roster holding the tombstone(s).
+    pub confirmed: Vec<PeerRef>,
+    /// Machines that could not be reached or did not confirm.
+    pub not_heard: Vec<PeerRef>,
+    /// Members that a revoked machine added and that stay linked (no `--cascade`).
+    pub added_by_revoked: Vec<PeerRef>,
+    /// Processes ended here because of the revocation.
+    pub sessions_killed: u32,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -446,6 +537,17 @@ pub enum EventKind {
     Served { service: String },
     /// A connection was refused (not a member, bad header, ...).
     Refused { reason: String },
+    /// Pairing progress (same steps as the IPC `pair` messages).
+    Pair {
+        role: PairRole,
+        #[serde(flatten)]
+        step: PairStep,
+    },
+    /// `peer` was tombstoned (here or learned by sync). `by` = who revoked it;
+    /// `sessions_killed` = processes it had running here that were ended.
+    Revoked { by: PeerRef, sessions_killed: u32, added: Vec<PeerRef> },
+    /// `peer` answered (or not) a pushed revocation.
+    Told { ok: bool, detail: String },
 }
 
 #[cfg(test)]
@@ -526,5 +628,20 @@ mod tests {
         let s = serde_json::to_string(&IpcResponse::Event(e.clone())).unwrap();
         let back: IpcResponse = serde_json::from_str(&s).unwrap();
         assert_eq!(back, IpcResponse::Event(e));
+        // Pairing steps nest a tagged enum inside the tagged event and response.
+        let step = PairStep::Confirm {
+            other: PeerRef { id: MachineId([1; 32]), name: "b".into() },
+            sigil: vec!["#.#.#".into(); 5],
+            hue: 2,
+            words: vec!["a".into(), "b".into(), "c".into()],
+        };
+        let e = Event { seq: 3, t_ms: 4, peer: None, kind: EventKind::Pair { role: PairRole::Joiner, step: step.clone() } };
+        let s = serde_json::to_string(&IpcResponse::Event(e.clone())).unwrap();
+        assert!(s.contains(r#""event":"pair""#) && s.contains(r#""step":"confirm""#) && s.contains(r#""role":"joiner""#), "{s}");
+        assert_eq!(serde_json::from_str::<IpcResponse>(&s).unwrap(), IpcResponse::Event(e));
+        let u = IpcResponse::Pair(PairUpdate { role: PairRole::Inviter, step: PairStep::FanOutDone { told: 1, not_yet: 0 } });
+        let s = serde_json::to_string(&u).unwrap();
+        assert_eq!(s, r#"{"kind":"pair","role":"inviter","step":"fan_out_done","told":1,"not_yet":0}"#);
+        assert_eq!(serde_json::from_str::<IpcResponse>(&s).unwrap(), u);
     }
 }

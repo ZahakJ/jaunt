@@ -24,6 +24,9 @@ pub const MAX_TOMBSTONES: usize = 4096;
 pub const MAX_RELAYS: usize = 8;
 pub const MAX_RELAY_URL: usize = 256;
 const MAX_ROSTER_FILE: u64 = 1 << 20;
+/// Timestamps (ms) beyond 2100-01-01 are treated as garbage. A fixed bound, not "now + x",
+/// so every machine sanitises the same input the same way and merge stays deterministic.
+pub const MAX_TIME: u64 = 4_102_444_800_000;
 
 /// A machine id: the raw 32 bytes of its ed25519 public key (iroh `EndpointId`).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -190,7 +193,6 @@ impl Roster {
         Ok(())
     }
 
-    #[allow(dead_code)] // for unlink
     pub fn is_member(&self, id: &MachineId) -> bool {
         self.entries.contains_key(id) && !self.tombstones.contains_key(id)
     }
@@ -241,7 +243,7 @@ impl Roster {
             name: name.to_string(),
             added_at: prev.map(|p| p.added_at).unwrap_or(now),
             added_by: prev.map(|p| p.added_by).unwrap_or(by),
-            named_at: now.max(prev.map(|p| p.named_at + 1).unwrap_or(0)),
+            named_at: now.max(prev.map(|p| p.named_at.saturating_add(1)).unwrap_or(0)),
         };
         if prev.map(|p| p.name == name).unwrap_or(false) {
             return Ok(false);
@@ -255,7 +257,6 @@ impl Roster {
         self.add(id, name, by, now)
     }
 
-    #[allow(dead_code)] // for unlink
     pub fn revoke(&mut self, id: MachineId, by: MachineId, now: u64) -> bool {
         let mut incoming = Roster::default();
         incoming.tombstones.insert(id, Tombstone { id, revoked_at: now, revoked_by: by });
@@ -263,9 +264,51 @@ impl Roster {
     }
 
     pub fn set_relays(&mut self, relays: Vec<String>, by: MachineId, now: u64) -> bool {
-        let at = now.max(self.fleet.updated_at + 1);
+        let at = now.max(self.fleet.updated_at.saturating_add(1));
         let incoming = Roster { fleet: Fleet { relays, updated_at: at, updated_by: Some(by) }, ..Default::default() };
         self.merge(&incoming)
+    }
+
+    /// Clean a roster that came from another machine before merging it. Entries and fleet
+    /// settings with timestamps past [`MAX_TIME`] are dropped (they could otherwise pin a
+    /// name or the relay list forever); tombstones are never dropped, only clamped, so no
+    /// input can make a revocation disappear. Returns what was dropped, in words.
+    pub fn sanitize_remote(&mut self) -> Vec<String> {
+        let mut dropped = Vec::new();
+        self.entries.retain(|id, e| {
+            let ok = e.added_at <= MAX_TIME && e.named_at <= MAX_TIME;
+            if !ok {
+                dropped.push(format!("entry {} (timestamp in the far future)", id.short()));
+            }
+            ok
+        });
+        for t in self.tombstones.values_mut() {
+            t.revoked_at = t.revoked_at.min(MAX_TIME);
+        }
+        if self.fleet.updated_at > MAX_TIME {
+            dropped.push("fleet settings (timestamp in the far future)".into());
+            self.fleet = Fleet::default();
+        }
+        dropped
+    }
+
+    /// Members that `by` added, directly or through machines it added (not `by` itself).
+    pub fn added_by_closure(&self, by: &MachineId) -> BTreeSet<MachineId> {
+        let mut out = BTreeSet::new();
+        let mut frontier = vec![*by];
+        while let Some(x) = frontier.pop() {
+            for e in self.members() {
+                if e.added_by == x && e.id != *by && e.id != x && out.insert(e.id) {
+                    frontier.push(e.id);
+                }
+            }
+        }
+        out
+    }
+
+    /// Ids tombstoned in `self` but not in `before`.
+    pub fn new_tombstones(&self, before: &Roster) -> Vec<MachineId> {
+        self.tombstones.keys().filter(|id| !before.tombstones.contains_key(id)).copied().collect()
     }
 
     /// Names to show for members. Two machines with the same name are told apart
@@ -468,6 +511,138 @@ mod tests {
         r.fleet.relays = vec!["not a url".into()];
         assert!(r.validate().is_err());
         assert!(serde_json::from_str::<Roster>(r#"{"entries":{"zz":{}}}"#).is_err());
+    }
+
+    /// A small deterministic generator of hostile rosters: few ids (so they collide), and
+    /// timestamps from 0 to u64::MAX.
+    struct Gen(u64);
+    impl Gen {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn time(&mut self) -> u64 {
+            match self.next() % 5 {
+                0 => 0,
+                1 => u64::MAX,
+                2 => MAX_TIME + self.next() % 1000,
+                _ => self.next() % 1000,
+            }
+        }
+        fn roster(&mut self) -> Roster {
+            let mut r = Roster::default();
+            for _ in 0..self.next() % 5 {
+                let i = (self.next() % 6) as u8;
+                let names = ["fern", "moss", "tin", "x"];
+                let e = Entry {
+                    id: id(i),
+                    name: names[(self.next() % 4) as usize].into(),
+                    added_at: self.time(),
+                    added_by: id((self.next() % 6) as u8),
+                    named_at: self.time(),
+                };
+                r.entries.insert(e.id, e);
+            }
+            for _ in 0..self.next() % 3 {
+                let i = (self.next() % 6) as u8;
+                r.tombstones.insert(id(i), Tombstone { id: id(i), revoked_at: self.time(), revoked_by: id((self.next() % 6) as u8) });
+            }
+            if self.next().is_multiple_of(2) {
+                r.fleet = Fleet { relays: vec![format!("https://r{}.example", self.next() % 3)], updated_at: self.time(), updated_by: Some(id(1)) };
+            }
+            r
+        }
+    }
+
+    #[test]
+    fn merge_laws_hold_for_hostile_rosters() {
+        let mut g = Gen(0x9e3779b97f4a7c15);
+        for _ in 0..300 {
+            let (mut a, mut b, mut c) = (g.roster(), g.roster(), g.roster());
+            for r in [&mut a, &mut b, &mut c] {
+                r.sanitize_remote();
+            }
+            assert_eq!(merged(&a, &b), merged(&b, &a));
+            assert_eq!(merged(&merged(&a, &b), &c), merged(&a, &merged(&b, &c)));
+            assert_eq!(merged(&a, &a), a);
+            // Revocation is monotone: whatever is merged in, a tombstoned id stays revoked.
+            let ab = merged(&a, &b);
+            for t in a.tombstones.keys().chain(b.tombstones.keys()) {
+                assert!(!ab.is_member(t));
+                assert!(ab.tombstones.contains_key(t));
+            }
+        }
+    }
+
+    #[test]
+    fn sanitize_drops_far_future_entries_but_never_tombstones() {
+        let mut r = roster(&[Entry { named_at: u64::MAX, ..entry(1, "fern", 10, 1) }, entry(2, "moss", 10, 1)], &[(3, u64::MAX, 2)]);
+        r.fleet = Fleet { relays: vec!["https://r.example".into()], updated_at: u64::MAX, updated_by: Some(id(2)) };
+        let dropped = r.sanitize_remote();
+        assert_eq!(dropped.len(), 2);
+        assert!(!r.entries.contains_key(&id(1)));
+        assert!(r.entries.contains_key(&id(2)));
+        assert_eq!(r.tombstones[&id(3)].revoked_at, MAX_TIME);
+        assert_eq!(r.fleet, Fleet::default());
+    }
+
+    #[test]
+    fn clock_skew_cannot_unrevoke() {
+        // Revoked by a machine whose clock says 1970; re-added by one whose clock is far ahead.
+        let mut a = roster(&[entry(2, "moss", 10, 1)], &[(2, 0, 1)]);
+        let ahead = roster(&[Entry { named_at: MAX_TIME, added_at: MAX_TIME, ..entry(2, "moss", 10, 3) }], &[]);
+        a.merge(&ahead);
+        assert!(!a.is_member(&id(2)));
+        assert!(a.add(id(2), "moss", id(1), MAX_TIME).is_err());
+        // A rename from a machine with a normal clock still wins over a far-future name.
+        let mut b = roster(&[Entry { named_at: MAX_TIME, ..entry(4, "tin", 10, 1) }], &[]);
+        assert!(b.rename(id(4), "tinny", 1_000).unwrap());
+        assert_eq!(b.entries[&id(4)].name, "tinny");
+        let mut c = roster(&[Entry { named_at: u64::MAX, ..entry(4, "tin", 10, 1) }], &[]);
+        assert!(c.rename(id(4), "tinny", 1_000).is_ok(), "no overflow at the top of the clock");
+    }
+
+    #[test]
+    fn a_revoked_machine_cannot_sync_its_way_back() {
+        // b knows c is revoked; c offers its own roster without the tombstone, with itself
+        // renamed and "re-added" later. Nothing changes c's status on b.
+        let mut b = roster(&[entry(1, "a", 1, 1), entry(2, "b", 2, 1), entry(3, "c", 3, 2)], &[(3, 50, 1)]);
+        let cs = roster(&[entry(1, "a", 1, 1), entry(2, "b", 2, 1), Entry { named_at: 999, ..entry(3, "c2", 900, 3) }], &[]);
+        b.merge(&cs);
+        assert!(!b.is_member(&id(3)));
+        // A machine that was offline merges with c first and then with b: revoked either way.
+        let mut d = roster(&[entry(1, "a", 1, 1), entry(3, "c", 3, 2), entry(4, "d", 4, 1)], &[]);
+        d.merge(&cs);
+        assert!(d.is_member(&id(3)), "before hearing from an informed member, d still trusts c (the documented window)");
+        d.merge(&b);
+        assert!(!d.is_member(&id(3)));
+        let mut d2 = roster(&[entry(4, "d", 4, 1)], &[]);
+        d2.merge(&b);
+        d2.merge(&cs);
+        assert!(!d2.is_member(&id(3)));
+    }
+
+    #[test]
+    fn a_member_may_revoke_others_and_that_spreads() {
+        // Flat trust (DESIGN §7): any member's tombstones are accepted, including one for
+        // the receiving machine itself.
+        let mut a = roster(&[entry(1, "a", 1, 1), entry(2, "b", 2, 1), entry(3, "c", 3, 1)], &[]);
+        let from_c = roster(&[], &[(1, 5, 3), (2, 5, 3)]);
+        assert!(a.merge(&from_c));
+        assert_eq!(a.members().map(|e| e.id).collect::<Vec<_>>(), vec![id(3)]);
+    }
+
+    #[test]
+    fn added_by_closure_is_transitive_and_skips_the_revoked() {
+        let r = roster(
+            &[entry(1, "a", 1, 1), entry(2, "b", 2, 1), entry(3, "c", 3, 2), entry(4, "d", 4, 3), entry(5, "e", 5, 1), entry(6, "f", 6, 2)],
+            &[(6, 9, 1)],
+        );
+        let got: Vec<MachineId> = r.added_by_closure(&id(2)).into_iter().collect();
+        assert_eq!(got, vec![id(3), id(4)], "c added by b, d added by c; f is already revoked");
+        assert!(r.added_by_closure(&id(4)).is_empty());
     }
 
     #[test]

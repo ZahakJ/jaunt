@@ -21,6 +21,7 @@ use crate::proto::{
     PeerState, PeerStatus, PingInfo, Reply, RevokedStatus, RttSample, Service, StatusSnapshot,
 };
 use crate::roster::{MachineId, Resolve, Roster, now_ms};
+use crate::children::Children;
 use crate::{identity, ipc, services, shell, systemd};
 
 const RETRY_EVERY: Duration = Duration::from_secs(30);
@@ -65,13 +66,22 @@ pub struct Daemon {
     started_at: u64,
     sessions_cache: Mutex<Option<(Instant, Option<u32>)>>,
     weak: std::sync::Weak<Daemon>,
+    /// Processes running here on behalf of peers (ended when a peer is revoked).
+    pub children: Arc<Children>,
+    /// Held for the whole of a link or join: one pairing at a time.
+    pub pairing: tokio::sync::Mutex<()>,
 }
 
 fn effective_relays(cfg: &Config, roster: &Roster) -> Vec<String> {
     if roster.fleet.updated_at > 0 { roster.fleet.relays.clone() } else { cfg.bootstrap_relays() }
 }
 
+/// The machines this one talks to: every member but itself, or nobody once this machine
+/// has been revoked (it left, or another member unlinked it).
 fn member_set(roster: &Roster, me: &MachineId) -> HashSet<MachineId> {
+    if roster.tombstones.contains_key(me) {
+        return HashSet::new();
+    }
     roster.members().map(|e| e.id).filter(|id| id != me).collect()
 }
 
@@ -139,6 +149,8 @@ pub async fn run(paths: Paths) -> Result<()> {
         conn_seq: AtomicU64::new(0),
         started_at: now_ms(),
         sessions_cache: Mutex::new(None),
+        children: Arc::new(Children::default()),
+        pairing: tokio::sync::Mutex::new(()),
     });
     d.events.emit(Some(d.me_ref()), EventKind::DaemonStarted { version: proto::VERSION.into() });
     tracing::info!("jaunt daemon {} id {} listening on {:?}", proto::VERSION, d.me, d.ep.bound_sockets());
@@ -205,7 +217,7 @@ impl Daemon {
         let _ = self.shutdown_tx.send(true);
     }
 
-    fn relays(&self) -> Vec<RelayUrl> {
+    pub(crate) fn relays(&self) -> Vec<RelayUrl> {
         self.relays.lock().map(|r| r.clone()).unwrap_or_default()
     }
 
@@ -485,11 +497,16 @@ impl Daemon {
         let Some(kick) = self.with_peer(&id, |p| p.kick.clone()) else { return };
         loop {
             if !self.is_member(&id) {
+                // `roster_changed` already closed the connection, except for a peer whose
+                // own sync revoked it (`jaunt leave`), which still needs to read its answer.
                 if let Ok(mut g) = self.peers.lock()
                     && let Some(p) = g.remove(&id)
                     && let Some(c) = p.conn
                 {
-                    c.close(CLOSE_NOT_MEMBER.into(), b"removed from the mesh");
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        c.close(CLOSE_NOT_MEMBER.into(), b"removed from the mesh");
+                    });
                 }
                 return;
             }
@@ -511,15 +528,16 @@ impl Daemon {
     async fn serve_conn(self: Arc<Self>, conn: Connection, id: MachineId) {
         while let Ok((send, recv)) = conn.accept_bi().await {
             let d = self.clone();
+            let c = conn.clone();
             tokio::spawn(async move {
-                if let Err(e) = d.serve_stream(id, send, recv).await {
+                if let Err(e) = d.serve_stream(c, id, send, recv).await {
                     tracing::debug!("stream from {} ended: {e:#}", id.short());
                 }
             });
         }
     }
 
-    async fn serve_stream(self: Arc<Self>, id: MachineId, mut send: SendStream, mut recv: RecvStream) -> Result<()> {
+    async fn serve_stream(self: Arc<Self>, conn: Connection, id: MachineId, mut send: SendStream, mut recv: RecvStream) -> Result<()> {
         let payload = timeout(HEADER_TIMEOUT, proto::expect_frame(&mut recv, FrameType::Header))
             .await
             .context("no request header within 10 s")??;
@@ -547,7 +565,7 @@ impl Daemon {
             return self.refuse_logged(&id, &mut send, "not a member of this mesh").await;
         }
         match hello.service {
-            Service::Sync => self.serve_sync(id, send, recv).await,
+            Service::Sync => self.serve_sync(conn, id, send, recv).await,
             Service::Ping => {
                 proto::write_json(&mut send, FrameType::Reply, &Reply::Ok).await?;
                 let info = PingInfo {
@@ -598,7 +616,7 @@ impl Daemon {
 
     // ---------------------------------------------------------------- roster sync
 
-    async fn serve_sync(&self, id: MachineId, mut send: SendStream, mut recv: RecvStream) -> Result<()> {
+    async fn serve_sync(&self, conn: Connection, id: MachineId, mut send: SendStream, mut recv: RecvStream) -> Result<()> {
         let payload = timeout(HEADER_TIMEOUT, proto::expect_frame(&mut recv, FrameType::Json)).await??;
         let theirs: Roster = proto::parse_json(&payload, MAX_FRAME)?;
         let changed = self.apply_remote_roster(&theirs, &id);
@@ -608,21 +626,57 @@ impl Daemon {
         send.finish()?;
         let changed = changed?;
         self.events.emit(Some(self.peer_ref(&id)), EventKind::Sync { changed, outgoing: false });
+        if !self.is_member(&id) {
+            // The sender's roster revoked the sender itself (`jaunt leave`): it was spared
+            // the immediate close so it could read this answer as its acknowledgement.
+            let _ = timeout(Duration::from_secs(2), send.stopped()).await;
+            conn.close(CLOSE_NOT_MEMBER.into(), b"removed from the mesh");
+        }
         Ok(())
+    }
+
+    /// One roster exchange on `conn`: send `ours`, return the peer's merged roster.
+    async fn exchange_roster(conn: &Connection, ours: &Roster) -> Result<Roster> {
+        let (mut send, mut recv) = conn.open_bi().await?;
+        let hello = Hello { proto: PROTO_VERSION, service: Service::Sync };
+        proto::write_json(&mut send, FrameType::Header, &hello).await?;
+        proto::write_json(&mut send, FrameType::Json, ours).await?;
+        let reply: Reply = proto::parse_json(&proto::expect_frame(&mut recv, FrameType::Reply).await?, MAX_HEADER)?;
+        if let Reply::Refused { reason } = reply {
+            bail!("sync refused: {reason}");
+        }
+        let theirs: Roster = proto::parse_json(&proto::expect_frame(&mut recv, FrameType::Json).await?, MAX_FRAME)?;
+        let _ = send.finish();
+        Ok(theirs)
+    }
+
+    /// Sync with `id` now (dialling if needed) and return its roster after the merge: the
+    /// acknowledgement used by link fan-out, unlink and leave. With `push`, that roster is
+    /// sent instead of ours and the answer is not merged here (leave).
+    pub async fn sync_once(self: &Arc<Self>, id: MachineId, push: Option<&Roster>, limit: Duration) -> Result<Roster> {
+        let res = timeout(limit, async {
+            let conn = self.connect(id).await?;
+            let ours = match push {
+                Some(r) => r.clone(),
+                None => self.roster_snapshot(),
+            };
+            let theirs = Self::exchange_roster(&conn, &ours).await?;
+            if push.is_none() {
+                let changed = self.apply_remote_roster(&theirs, &id)?;
+                self.events.emit(Some(self.peer_ref(&id)), EventKind::Sync { changed, outgoing: true });
+            }
+            Ok(theirs)
+        })
+        .await;
+        match res {
+            Ok(r) => r,
+            Err(_) => bail!("no answer within {} s", limit.as_secs()),
+        }
     }
 
     async fn sync_with(self: Arc<Self>, conn: Connection, id: MachineId) {
         let res = timeout(Duration::from_secs(15), async {
-            let (mut send, mut recv) = conn.open_bi().await?;
-            let hello = Hello { proto: PROTO_VERSION, service: Service::Sync };
-            proto::write_json(&mut send, FrameType::Header, &hello).await?;
-            proto::write_json(&mut send, FrameType::Json, &self.roster_snapshot()).await?;
-            let reply: Reply = proto::parse_json(&proto::expect_frame(&mut recv, FrameType::Reply).await?, MAX_HEADER)?;
-            if let Reply::Refused { reason } = reply {
-                bail!("sync refused: {reason}");
-            }
-            let theirs: Roster = proto::parse_json(&proto::expect_frame(&mut recv, FrameType::Json).await?, MAX_FRAME)?;
-            let _ = send.finish();
+            let theirs = Self::exchange_roster(&conn, &self.roster_snapshot()).await?;
             self.apply_remote_roster(&theirs, &id)
         })
         .await;
@@ -638,64 +692,99 @@ impl Daemon {
     }
 
     fn apply_remote_roster(&self, theirs: &Roster, from: &MachineId) -> Result<bool> {
+        let mut theirs = theirs.clone();
+        for what in theirs.sanitize_remote() {
+            tracing::warn!("ignored {what} in the roster from {}", from.short());
+        }
         theirs.validate().context("the peer sent an invalid roster")?;
-        let changed = {
+        let (changed, before) = {
             let mut r = self.roster.lock().map_err(|_| anyhow!("roster lock poisoned"))?;
+            let before = r.clone();
             let mut merged = r.clone();
-            if !merged.merge(theirs) {
-                false
+            if !merged.merge(&theirs) {
+                (false, before)
             } else {
                 merged.validate().context("merging would exceed the roster limits")?;
                 merged.save(&self.paths)?;
                 *r = merged;
-                true
+                (true, before)
             }
         };
         if changed {
-            self.roster_changed(format!("synced from {}", self.name_of(from)));
+            self.roster_changed(format!("synced from {}", self.name_of(from)), &before, Some(*from));
         }
         Ok(changed)
     }
 
     /// Apply a local roster edit, persist it and spread it.
-    fn edit_roster(&self, what: String, f: impl FnOnce(&mut Roster) -> Result<bool>) -> Result<bool> {
-        let changed = {
+    pub(crate) fn edit_roster(&self, what: String, f: impl FnOnce(&mut Roster) -> Result<bool>) -> Result<bool> {
+        let (changed, before) = {
             let mut r = self.roster.lock().map_err(|_| anyhow!("roster lock poisoned"))?;
+            let before = r.clone();
             let mut next = r.clone();
             if !f(&mut next)? {
-                false
+                (false, before)
             } else {
                 next.validate()?;
                 next.save(&self.paths)?;
                 *r = next;
-                true
+                (true, before)
             }
         };
         if changed {
-            self.roster_changed(what);
+            self.roster_changed(what, &before, None);
         }
         Ok(changed)
     }
 
-    fn roster_changed(&self, what: String) {
-        let (members, relay_strs) = match self.roster.lock() {
-            Ok(r) => (member_set(&r, &self.me), r.fleet.relays.clone()),
-            Err(_) => return,
-        };
+    /// Everything that follows a roster change: the handshake allowlist, relays, ending
+    /// what revoked machines have here, events, and pushing the change on. `spare` is a
+    /// peer whose sync is being answered right now; its connection is closed after the
+    /// answer instead (see `serve_sync`).
+    fn roster_changed(&self, what: String, before: &Roster, spare: Option<MachineId>) {
+        let after = self.roster_snapshot();
+        let members = member_set(&after, &self.me);
+        // Membership first: from here on the handshake hook and every stream open refuse
+        // the revoked ids.
         self.members.set(members.clone());
-        let fleet_set = self.roster.lock().map(|r| r.fleet.updated_at > 0).unwrap_or(false);
-        if fleet_set {
-            self.apply_relays(relay_strs);
+        if after.fleet.updated_at > 0 {
+            self.apply_relays(after.fleet.relays.clone());
         }
-        // Close connections to machines that are no longer members.
+        // End what non-members are running here, and close their connections.
+        let mut killed: HashMap<MachineId, u32> = HashMap::new();
+        for peer in self.children.peers() {
+            if !members.contains(&peer) {
+                killed.insert(peer, self.children.kill_peer(&peer) as u32);
+            }
+        }
         if let Ok(g) = self.peers.lock() {
             for (id, p) in g.iter() {
                 if !members.contains(id)
+                    && Some(*id) != spare
                     && let Some(c) = &p.conn
                 {
                     c.close(CLOSE_NOT_MEMBER.into(), b"removed from the mesh");
                 }
             }
+        }
+        for id in after.new_tombstones(before) {
+            let Some(t) = after.tombstones.get(&id) else { continue };
+            let name = after.entries.get(&id).map(|e| e.name.clone()).unwrap_or_else(|| id.short());
+            let by = PeerRef { id: t.revoked_by, name: after.entries.get(&t.revoked_by).map(|e| e.name.clone()).unwrap_or_else(|| t.revoked_by.short()) };
+            let added: Vec<PeerRef> = after
+                .added_by_closure(&id)
+                .into_iter()
+                .filter(|x| *x != self.me)
+                .map(|x| PeerRef { id: x, name: after.display_name(&x) })
+                .collect();
+            if id == self.me {
+                tracing::warn!("this machine was unlinked by {}; run 'jaunt reset' and link it again to rejoin", by.name);
+            } else if !added.is_empty() {
+                let names: Vec<&str> = added.iter().map(|p| p.name.as_str()).collect();
+                tracing::warn!("{name} was unlinked; it had added {} (still linked; 'jaunt unlink {name} --cascade' revokes them too)", names.join(", "));
+            }
+            let sessions_killed = killed.get(&id).copied().unwrap_or(0);
+            self.events.emit(Some(PeerRef { id, name }), EventKind::Revoked { by, sessions_killed, added });
         }
         self.events.emit(None, EventKind::RosterChanged { what });
         self.roster_tx.send_modify(|v| *v += 1);
@@ -706,7 +795,12 @@ impl Daemon {
         let conns: Vec<(MachineId, Connection)> = self
             .peers
             .lock()
-            .map(|g| g.iter().filter_map(|(id, p)| p.conn.clone().map(|c| (*id, c))).collect())
+            .map(|g| {
+                g.iter()
+                    .filter(|(id, _)| self.is_member(id))
+                    .filter_map(|(id, p)| p.conn.clone().map(|c| (*id, c)))
+                    .collect()
+            })
             .unwrap_or_default();
         let Some(d) = self.weak.upgrade() else { return };
         for (id, conn) in conns {
@@ -802,7 +896,7 @@ impl Daemon {
             Resolve::Found(id) => Ok(id),
             Resolve::NotFound => {
                 if r.resolve(target, None) == Resolve::Found(self.me) {
-                    bail!("{target} is this machine");
+                    bail!("{target} is this machine (to take it out of the mesh: jaunt leave)");
                 }
                 let names: Vec<String> =
                     r.display_names().into_iter().filter(|(id, _)| *id != self.me).map(|(_, n)| n).collect();

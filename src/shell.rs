@@ -126,6 +126,8 @@ pub async fn serve(d: &Arc<Daemon>, from: MachineId, req: ShellRequest, mut send
     };
     drop(slave);
     let pid = child.id().and_then(|p| rustix::process::Pid::from_raw(p as i32));
+    // Registered so that unlinking `from` ends this pty client at once.
+    let _ticket = d.children.track(from, pid);
     proto::write_json(&mut send, FrameType::Reply, &Reply::Ok).await?;
     if tmux.is_none() {
         let note = format!("tmux is not installed on {me}: this is a plain login shell and it will end if the link drops");
