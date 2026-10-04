@@ -16,7 +16,7 @@ pub fn render(m: &Mesh, width: u16, now_ms: u64) -> Canvas {
     let gap = m.peers.len() <= 8;
     let rows = tree_rows(m.peers.len(), gap);
     let mut c = Canvas::new(w, rows + 5);
-    header(&mut c, 0, m, "", now_ms);
+    header(&mut c, 0, m, "", 0, now_ms);
     let opts = TreeOpts { now_ms, selected: None, gap, offset: 0 };
     draw_tree(&mut c, 1, 2, w - 2, rows, m, &opts);
 

@@ -261,12 +261,25 @@ pub fn draw(st: &State, w: u16, now: u64) -> Canvas {
             }
             c.text(3, y, "on the new machine run", Style::fg(theme::DIM));
             y += 1;
-            let cmd = match &st.relay {
-                Some(r) => format!("jaunt join {code} --relay {r}"),
-                None => format!("jaunt join {code}"),
-            };
+            let head = format!("jaunt join {code}");
+            let tail = st.relay.as_ref().map(|r| format!("--relay {r}"));
+            let room = w.saturating_sub(6);
+            let cmd_st = Style::fg(theme::WHITE).bold();
             c.put(3, y, g.arrow, Style::fg(theme::accent(0.5)));
-            c.text_fit(5, y, &cmd, Style::fg(theme::WHITE).bold(), w.saturating_sub(6), g.ellipsis);
+            match tail {
+                Some(t) if (head.len() + 1 + t.len()) as u16 > room => {
+                    // Too wide for one line: a shell continuation, so it still pastes whole.
+                    c.text_fit(5, y, &format!("{head} \\"), cmd_st, room, g.ellipsis);
+                    y += 1;
+                    c.text_fit(9, y, &t, cmd_st, w.saturating_sub(10), g.ellipsis);
+                }
+                Some(t) => {
+                    c.text(5, y, &format!("{head} {t}"), cmd_st);
+                }
+                None => {
+                    c.text_fit(5, y, &head, cmd_st, room, g.ellipsis);
+                }
+            }
             y += 1;
             if st.first_machine {
                 c.text(3, y, "this is the first machine: the mesh starts here", Style::fg(theme::DIM));
@@ -328,19 +341,24 @@ pub fn draw(st: &State, w: u16, now: u64) -> Canvas {
 
     // The sigil and the words.
     if !st.sigil.is_empty() && st.end.as_ref().is_none_or(|(ok, _)| *ok) {
-        let col = theme::SIGIL[st.hue as usize % theme::SIGIL.len()];
+        let sg = sigil(&st.sigil, st.hue, &st.words);
         let sx = 4;
-        for (r, row) in st.sigil.iter().enumerate() {
-            for (i, cell) in row.chars().enumerate() {
-                if cell == '#' {
-                    for (k, ch) in g.block.chars().enumerate() {
-                        let shade = col.mix(theme::WHITE, 0.12 * (4 - r.min(4)) as f32 / 4.0);
-                        c.put(sx + i as u16 * 2 + k as u16, y + r as u16, ch, Style::fg(shade));
-                    }
+        // Faint corners make it a badge rather than a blob.
+        let [tl, tr, bl, br, _, _] = g.corner;
+        let fr = Style::fg(theme::FAINT);
+        c.put(sx - 2, y.saturating_sub(1), tl, fr);
+        c.put(sx + 11, y.saturating_sub(1), tr, fr);
+        c.put(sx - 2, y + 5, bl, fr);
+        c.put(sx + 11, y + 5, br, fr);
+        for (r, row) in sg.iter().enumerate() {
+            for (i, cell) in row.iter().enumerate() {
+                if let Some((fill, col)) = cell {
+                    c.text(sx + i as u16 * 2, y + r as u16, fill, Style::fg(*col));
                 }
             }
         }
-        let tx = sx + 14;
+        let col = sigil_tones(st.hue, &st.words)[1];
+        let tx = sx + 15;
         let other = st.other_label();
         if st.steps.linked.is_none() {
             c.text(tx, y, &format!("compare with the screen of {other}"), Style::fg(theme::DIM));
@@ -350,17 +368,32 @@ pub fn draw(st: &State, w: u16, now: u64) -> Canvas {
         let mut x = tx;
         for (i, wd) in st.words.iter().enumerate() {
             if i > 0 {
-                x = c.text(x, y + 2, &format!(" {} ", g.dot), Style::fg(theme::FAINT));
+                x = c.text(x, y + 1, &format!(" {} ", g.dot), Style::fg(theme::FAINT));
             }
-            x = c.text(x, y + 2, wd, Style::fg(col).bold());
+            x = c.text(x, y + 1, wd, Style::fg(col).bold());
         }
-        let mark = |ok: bool| if ok { (g.check, Style::fg(theme::GREEN).bold()) } else { (g.dot, Style::fg(theme::FAINT)) };
-        let (m1, s1) = mark(st.here_ok);
-        let (m2, s2) = mark(st.there_ok);
-        c.put(tx, y + 4, m1, s1);
-        let x = c.text(tx + 2, y + 4, "here", Style::fg(if st.here_ok { theme::WHITE } else { theme::DIM }));
-        c.put(x + 3, y + 4, m2, s2);
-        c.text(x + 5, y + 4, &other, Style::fg(if st.there_ok { theme::WHITE } else { theme::DIM }));
+        // Who has confirmed, in words.
+        let spin = g.spinner[((now / 80) as usize) % g.spinner.len()];
+        let me = format!("{} (here)", st.me);
+        let nw = me.chars().count().max(other.chars().count()) as u16;
+        let who = [
+            (me.as_str(), st.here_ok, if st.asking { "not yet: answer below" } else { "not yet" }),
+            (other.as_str(), st.there_ok, "waiting for its answer"),
+        ];
+        for (k, (name, ok, wait)) in who.iter().enumerate() {
+            let yy = y + 3 + k as u16;
+            let (m, ms) = if *ok {
+                (g.check, Style::fg(theme::GREEN).bold())
+            } else if k == 1 && st.end.is_none() {
+                (spin, Style::fg(theme::accent(0.6)))
+            } else {
+                (g.dot, Style::fg(theme::FAINT))
+            };
+            c.put(tx, yy, m, ms);
+            c.text(tx + 2, yy, name, Style::fg(if *ok { theme::WHITE } else { theme::DIM }));
+            let (t, ts) = if *ok { ("confirmed", Style::fg(theme::GREEN)) } else { (*wait, Style::fg(theme::DIM)) };
+            c.text_fit(tx + 4 + nw, yy, t, ts, w.saturating_sub(tx + 5 + nw), g.ellipsis);
+        }
         y += 6;
         if st.asking {
             let x = c.text(3, y, "Same sigil and words on both screens?  ", Style::fg(theme::WHITE).bold());
@@ -368,11 +401,6 @@ pub fn draw(st: &State, w: u16, now: u64) -> Canvas {
             let x = c.text(x + 1, y, "yes   ", Style::fg(theme::DIM));
             let x = c.text(x, y, "n", Style::fg(theme::RED).bold());
             c.text(x + 1, y, "no", Style::fg(theme::DIM));
-            y += 2;
-        } else if st.steps.linked.is_none() && st.end.is_none() {
-            let spin = g.spinner[((now / 80) as usize) % g.spinner.len()];
-            c.put(3, y, spin, Style::fg(theme::accent(0.6)));
-            c.text(5, y, &format!("waiting for {other} to confirm"), Style::fg(theme::DIM));
             y += 2;
         }
     }
@@ -414,6 +442,49 @@ pub fn draw(st: &State, w: u16, now: u64) -> Canvas {
         y += 1;
     }
     trim(c, y)
+}
+
+/// The sigil's three tones. Picked from what both machines already show (the hue hint
+/// and the three words, all derived from the same hash), so they are identical on both
+/// screens; this is only a choice of colours, not more of the check.
+fn sigil_tones(hue: u8, words: &[String]) -> [theme::Col; 3] {
+    let pal = theme::SIGIL;
+    let a = hue as usize % pal.len();
+    let sum: usize = words.iter().flat_map(|w| w.bytes()).map(usize::from).sum();
+    // The second hue: any other one that is also distinct in 16 colours.
+    let others: Vec<usize> = (0..pal.len()).filter(|&k| pal[k].ansi != pal[a].ansi).collect();
+    let b = others.get(sum % others.len().max(1)).copied().unwrap_or(a);
+    let mut core = pal[a].mix(theme::WHITE, 0.55);
+    core.ansi = 97;
+    [core, pal[a], pal[b]]
+}
+
+/// The sigil as cells: `(fill, colour)` per lit pixel. Tones go in rings from the
+/// centre (the order of the rings is picked by the words), and each tone has its own
+/// fill, so the pattern of tones is the same without colour.
+fn sigil(rows: &[String], hue: u8, words: &[String]) -> Vec<Vec<Option<(&'static str, theme::Col)>>> {
+    let g = glyphs();
+    let mono = matches!(theme::theme().mode, theme::ColorMode::None | theme::ColorMode::Plain);
+    let tones = sigil_tones(hue, words);
+    let first = words.first().and_then(|w| w.bytes().next()).unwrap_or(0) as usize;
+    let order = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]][first % 6];
+    rows.iter()
+        .enumerate()
+        .map(|(r, row)| {
+            row.chars()
+                .enumerate()
+                .map(|(i, cell)| {
+                    (cell == '#').then(|| {
+                        let ring = (r as i32 - 2).abs().max((i as i32 - 2).abs()) as usize;
+                        let t = order[ring.min(2)];
+                        // With colour the tones are colours; without, distinct fills.
+                        let fill = if mono { g.sigil[t] } else { g.sigil[0] };
+                        (fill, tones[t])
+                    })
+                })
+                .collect()
+        })
+        .collect()
 }
 
 fn trim(c: Canvas, h: u16) -> Canvas {

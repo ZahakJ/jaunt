@@ -15,6 +15,10 @@ use crate::roster::now_ms;
 use crate::{ipc, term};
 
 const HISTORY: u32 = 60;
+/// Shortest time between two frames (about 15 fps).
+const FRAME_MS: u64 = 66;
+/// How long the tag's dot stays bright after the daemon sent something.
+const BEAT_MS: u64 = 400;
 
 enum Next {
     Quit,
@@ -72,10 +76,24 @@ async fn session(paths: &Paths, tui: &mut Tui, st: &mut ViewState) -> Result<Nex
     let mut winch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
     let mut term_sig = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut poll = tokio::time::interval(Duration::from_secs(2));
-    let mut tick = tokio::time::interval(Duration::from_millis(66));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Redraws: at most ~15 a second while something moves or data keeps arriving; when
+    // idle, once a second (ages) plus once when the tag's dot settles. No busy loop: the
+    // task sleeps until the next frame is due.
     let mut last_draw = 0u64;
+    let mut dirty = true;
     loop {
+        let now = now_ms();
+        let mut due = last_draw + 1000;
+        if dirty || mesh.animating(now) {
+            due = due.min(last_draw + FRAME_MS);
+        }
+        if st.beat_ms + BEAT_MS > last_draw {
+            due = due.min(st.beat_ms + BEAT_MS);
+        }
+        if let Some(t) = &st.toast {
+            due = due.min(t.2);
+        }
+        let wait = Duration::from_millis(due.saturating_sub(now));
         tokio::select! {
             f = frames.recv() => {
                 let f = match f {
@@ -86,12 +104,14 @@ async fn session(paths: &Paths, tui: &mut Tui, st: &mut ViewState) -> Result<Nex
                 let now = now_ms();
                 match proto::parse_json::<IpcResponse>(&f.payload, MAX_FRAME)? {
                     IpcResponse::Status(s) => mesh.apply_status(&s),
-                    IpcResponse::Event(e) => mesh.apply_event(&e, now, e.t_ms + 1500 >= now),
+                    IpcResponse::Event(e) => {
+                        mesh.apply_event(&e, now, e.t_ms + 1500 >= now);
+                        st.beat_ms = now;
+                    }
                     IpcResponse::Rtt { peer, sample } => mesh.apply_rtt(&peer, &sample, now),
                     _ => {}
                 }
-                tui.draw(&mesh, st, now);
-                last_draw = now;
+                dirty = true;
             }
             k = tui.key() => {
                 let Some(k) = k else { return Ok(Next::Quit) };
@@ -105,31 +125,34 @@ async fn session(paths: &Paths, tui: &mut Tui, st: &mut ViewState) -> Result<Nex
                     Action::Link => return Ok(Next::Link),
                     Action::None => {}
                 }
-                tui.draw(&mesh, st, now_ms());
+                // Keys answer at once.
+                let now = now_ms();
+                tui.draw(&mesh, st, now);
+                last_draw = now;
+                dirty = false;
             }
-            _ = tick.tick() => {
+            _ = tokio::time::sleep(wait) => {
                 let now = now_ms();
                 mesh.prune(now);
-                // Fast frames only while something moves; otherwise once a second for the ages.
-                if mesh.animating(now) || now >= last_draw + 1000 || st.toast.as_ref().is_some_and(|t| now >= t.2) {
-                    if st.toast.as_ref().is_some_and(|t| now >= t.2) {
-                        st.toast = None;
-                    }
-                    tui.draw(&mesh, st, now);
-                    last_draw = now;
+                if st.toast.as_ref().is_some_and(|t| now >= t.2) {
+                    st.toast = None;
                 }
+                tui.draw(&mesh, st, now);
+                last_draw = now;
+                dirty = false;
             }
             _ = poll.tick() => {
                 // Sessions and host state come from pings, which have no events.
                 if let Ok(Ok(IpcResponse::Status(s))) = tokio::time::timeout(Duration::from_secs(1), ipc::call(paths, &IpcRequest::Status)).await {
                     mesh.apply_status(&s);
+                    dirty = true;
                 } else {
                     st.toast = Some(("the daemon is not answering".into(), Tone::Bad, now_ms() + 3000));
                 }
             }
             _ = winch.recv() => {
                 tui.resized();
-                tui.draw(&mesh, st, now_ms());
+                dirty = true;
             }
             _ = term_sig.recv() => return Ok(Next::Quit),
         }

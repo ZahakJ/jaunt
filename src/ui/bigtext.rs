@@ -58,6 +58,45 @@ pub fn width(text: &str) -> Option<usize> {
     Some(w)
 }
 
+/// The wordmark: "JAUNT" in a 6x6 pixel face with two-pixel stems (a J with a proper
+/// top bar, so it cannot be read as an L), three terminal rows tall.
+const WORDMARK: [[&str; 6]; 5] = [
+    ["..####", "....##", "....##", "....##", "##..##", ".####."],
+    [".####.", "##..##", "##..##", "######", "##..##", "##..##"],
+    ["##..##", "##..##", "##..##", "##..##", "##..##", ".####."],
+    ["##..##", "###.##", "######", "##.###", "##..##", "##..##"],
+    ["######", "..##..", "..##..", "..##..", "..##..", "..##.."],
+];
+
+/// The wordmark as three rows of half-block cells.
+pub fn wordmark(half: [char; 3]) -> [Vec<char>; 3] {
+    let mut px: [Vec<bool>; 6] = Default::default();
+    for (i, letter) in WORDMARK.iter().enumerate() {
+        for (r, row) in px.iter_mut().enumerate() {
+            if i > 0 {
+                row.push(false);
+            }
+            row.extend(letter[r].chars().map(|c| c == '#'));
+        }
+    }
+    cells(&px, half)
+}
+
+fn cells(px: &[Vec<bool>; 6], half: [char; 3]) -> [Vec<char>; 3] {
+    let mut out: [Vec<char>; 3] = Default::default();
+    for (k, line) in out.iter_mut().enumerate() {
+        *line = (0..px[0].len())
+            .map(|x| match (px[2 * k][x], px[2 * k + 1][x]) {
+                (true, true) => half[2],
+                (true, false) => half[0],
+                (false, true) => half[1],
+                _ => ' ',
+            })
+            .collect();
+    }
+    out
+}
+
 /// Three rows of cells (`half` = upper, lower, full block) for `text`, or `None`.
 pub fn render(text: &str, half: [char; 3]) -> Option<[Vec<char>; 3]> {
     let mut px: [Vec<bool>; 6] = Default::default();
@@ -73,18 +112,7 @@ pub fn render(text: &str, half: [char; 3]) -> Option<[Vec<char>; 3]> {
             }
         }
     }
-    let mut out: [Vec<char>; 3] = Default::default();
-    for (k, line) in out.iter_mut().enumerate() {
-        *line = (0..px[0].len())
-            .map(|x| match (px[2 * k][x], px[2 * k + 1][x]) {
-                (true, true) => half[2],
-                (true, false) => half[0],
-                (false, true) => half[1],
-                _ => ' ',
-            })
-            .collect();
-    }
-    Some(out)
+    Some(cells(&px, half))
 }
 
 #[cfg(test)]
@@ -100,5 +128,7 @@ mod tests {
         assert!(render("é", ['a', 'b', 'c']).is_none());
         // Every letter and digit has a glyph.
         assert!(width("abcdefghijklmnopqrstuvwxyz0123456789-").is_some());
+        let w = wordmark(['▀', '▄', '█']);
+        assert!(w.iter().all(|r| r.len() == 5 * 6 + 4));
     }
 }

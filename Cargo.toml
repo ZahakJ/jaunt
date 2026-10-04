@@ -40,3 +40,12 @@ strip = true
 codegen-units = 1
 opt-level = "s"
 panic = "abort"
+
+# Keep the build footprint small: no debug info, no incremental cache.
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.test]
+debug = 0
+incremental = false

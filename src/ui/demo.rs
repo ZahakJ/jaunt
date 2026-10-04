@@ -268,7 +268,8 @@ async fn mesh(at: Option<i64>) -> Result<i32> {
     }
     let mut sim = Sim::new();
     let mut tui = Tui::new();
-    let mut st = ViewState { tag: "demo", ..ViewState::default() };
+    // moss is selected: its path history shows the relay-to-direct upgrade.
+    let mut st = ViewState { tag: "demo", selected: 1, ..ViewState::default() };
     let start = Instant::now();
     let clock = |start: &Instant| at.unwrap_or(start.elapsed().as_millis() as i64);
     tui.enter()?;

@@ -82,6 +82,36 @@ impl Canvas {
         nx + 1
     }
 
+    /// Like [`text_fit`], but never cuts a word: a shorter run of whole words with `…`,
+    /// or nothing at all. Returns the next x (unchanged when nothing was written).
+    pub fn text_words(&mut self, x: u16, y: u16, s: &str, st: Style, max: u16, ellipsis: char) -> u16 {
+        let n = s.chars().count();
+        if n <= max as usize {
+            return self.text(x, y, s, st);
+        }
+        let chars: Vec<char> = s.chars().collect();
+        let mut cut = None;
+        for i in (1..chars.len().min(max as usize)).rev() {
+            if chars[i] == ' ' && chars[i - 1] != ' ' {
+                cut = Some(i);
+                break;
+            }
+        }
+        match cut {
+            Some(i) => {
+                let head: String = chars[..i].iter().collect();
+                let head = head.trim_end().trim_end_matches(['·', '.', ':', ',']).trim_end().to_string();
+                if head.is_empty() || head.chars().count() + 2 > max as usize {
+                    return x;
+                }
+                let nx = self.text(x, y, &head, st);
+                self.put(nx + 1, y, ellipsis, st);
+                nx + 2
+            }
+            None => x,
+        }
+    }
+
     pub fn hline(&mut self, x0: u16, x1: u16, y: u16, ch: char, st: Style) {
         for x in x0..x1 {
             self.put(x, y, ch, st);
@@ -252,5 +282,9 @@ mod tests {
         let mut c = Canvas::new(10, 1);
         c.text_fit(0, 0, "abcdefgh", Style::PLAIN, 5, '~');
         assert_eq!(c.lines(ColorMode::None)[0], "abcd~");
+        let mut c = Canvas::new(20, 1);
+        assert_eq!(c.text_words(0, 0, "203.0.113.40:7841", Style::PLAIN, 10, '~'), 0);
+        c.text_words(0, 0, "relay to direct now", Style::PLAIN, 12, '~');
+        assert_eq!(c.lines(ColorMode::None)[0], "relay to ~");
     }
 }

@@ -78,9 +78,17 @@ pub struct Glyphs {
     pub updown: &'static str,
     pub spark: [char; 8],
     pub spinner: &'static [char],
-    pub block: &'static str,
     pub half: [char; 3],
     pub corner: [char; 6],
+    /// The relay as a waypoint on a relayed link, and lit while a packet passes it.
+    pub waypoint: char,
+    pub waypoint_lit: char,
+    /// The two ends of a broken (offline) link.
+    pub cut: [char; 2],
+    /// Sigil pixel fills, one per tone (distinct even without colour).
+    pub sigil: [&'static str; 3],
+    /// One second of a path strip with no sample.
+    pub gap: char,
 }
 
 const UNICODE: Glyphs = Glyphs {
@@ -102,9 +110,13 @@ const UNICODE: Glyphs = Glyphs {
     updown: "↑↓",
     spark: ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'],
     spinner: &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'],
-    block: "██",
     half: ['▀', '▄', '█'],
     corner: ['╭', '╮', '╰', '╯', '─', '│'],
+    waypoint: '◇',
+    waypoint_lit: '◆',
+    cut: ['╴', '╶'],
+    sigil: ["██", "▓▓", "▒▒"],
+    gap: '·',
 };
 
 const ASCII: Glyphs = Glyphs {
@@ -126,9 +138,13 @@ const ASCII: Glyphs = Glyphs {
     updown: "j/k",
     spark: ['_', '.', ',', ':', '-', '=', '+', '#'],
     spinner: &['|', '/', '-', '\\'],
-    block: "##",
     half: ['"', '.', '#'],
     corner: ['+', '+', '+', '+', '-', '|'],
+    waypoint: '@',
+    waypoint_lit: '@',
+    cut: ['-', '-'],
+    sigil: ["##", "%%", "++"],
+    gap: '.',
 };
 
 pub struct Theme {
