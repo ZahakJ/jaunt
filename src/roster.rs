@@ -1,0 +1,483 @@
+//! The roster: who is in the mesh. A small replicated set (DESIGN §7).
+//!
+//! - entries `{id, name, added_at, added_by, named_at}`: union; for the same id the entry
+//!   with the greatest `(named_at, name, added_at, added_by)` wins, so renames propagate.
+//! - tombstones `{id, revoked_at, revoked_by}`: union, permanent; for the same id the
+//!   earliest `(revoked_at, revoked_by)` is kept. A tombstone always beats an entry.
+//! - fleet settings: last writer wins by `(updated_at, updated_by, relays)`.
+//!
+//! Every choice is a max/min over a total order, so merge is commutative, associative and
+//! idempotent. Ids are compared as raw key bytes.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::str::FromStr;
+
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+use crate::paths::{Paths, read_capped, write_private_atomic};
+
+pub const MAX_NAME: usize = 32;
+pub const MAX_ENTRIES: usize = 256;
+pub const MAX_TOMBSTONES: usize = 4096;
+pub const MAX_RELAYS: usize = 8;
+pub const MAX_RELAY_URL: usize = 256;
+const MAX_ROSTER_FILE: u64 = 1 << 20;
+
+/// A machine id: the raw 32 bytes of its ed25519 public key (iroh `EndpointId`).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MachineId(pub [u8; 32]);
+
+impl MachineId {
+    pub fn from_endpoint(id: &iroh::EndpointId) -> MachineId {
+        MachineId(*id.as_bytes())
+    }
+    pub fn to_endpoint(self) -> Result<iroh::EndpointId> {
+        iroh::EndpointId::from_bytes(&self.0).map_err(|_| anyhow::anyhow!("{self} is not a valid ed25519 public key"))
+    }
+    pub fn short(&self) -> String {
+        self.to_string()[..8].to_string()
+    }
+}
+
+impl fmt::Display for MachineId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&data_encoding::HEXLOWER.encode(&self.0))
+    }
+}
+impl fmt::Debug for MachineId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "MachineId({})", self.short())
+    }
+}
+impl FromStr for MachineId {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self> {
+        let s = s.trim();
+        if s.len() != 64 {
+            bail!("a machine id is 64 hex characters, got {}", s.len());
+        }
+        let b = data_encoding::HEXLOWER_PERMISSIVE.decode(s.as_bytes()).context("a machine id is hex")?;
+        let arr: [u8; 32] = b.try_into().map_err(|_| anyhow::anyhow!("bad id length"))?;
+        Ok(MachineId(arr))
+    }
+}
+impl Serialize for MachineId {
+    fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(&self.to_string())
+    }
+}
+impl<'de> Deserialize<'de> for MachineId {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// Names: 1..=32 of `[a-z0-9-]`, not starting or ending with `-`.
+pub fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_NAME
+        && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Entry {
+    pub id: MachineId,
+    pub name: String,
+    pub added_at: u64,
+    pub added_by: MachineId,
+    #[serde(default)]
+    pub named_at: u64,
+}
+
+impl Entry {
+    fn rank(&self) -> (u64, &str, u64, &MachineId) {
+        (self.named_at, &self.name, self.added_at, &self.added_by)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tombstone {
+    pub id: MachineId,
+    pub revoked_at: u64,
+    pub revoked_by: MachineId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct Fleet {
+    pub relays: Vec<String>,
+    /// 0 = never set.
+    pub updated_at: u64,
+    pub updated_by: Option<MachineId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct Roster {
+    #[serde(default)]
+    pub entries: BTreeMap<MachineId, Entry>,
+    #[serde(default)]
+    pub tombstones: BTreeMap<MachineId, Tombstone>,
+    #[serde(default)]
+    pub fleet: Fleet,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Resolve {
+    Found(MachineId),
+    NotFound,
+    Ambiguous(Vec<String>),
+}
+
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+impl Roster {
+    pub fn load(paths: &Paths) -> Result<Roster> {
+        let path = paths.roster_file();
+        match read_capped(&path, MAX_ROSTER_FILE)? {
+            None => Ok(Roster::default()),
+            Some(b) => {
+                let r: Roster = serde_json::from_slice(&b).with_context(|| format!("cannot parse {}", path.display()))?;
+                r.validate().with_context(|| format!("{} is invalid", path.display()))?;
+                Ok(r)
+            }
+        }
+    }
+
+    pub fn save(&self, paths: &Paths) -> Result<()> {
+        let mut text = serde_json::to_vec_pretty(self)?;
+        text.push(b'\n');
+        write_private_atomic(&paths.roster_file(), &text)
+    }
+
+    /// Check a roster (from disk or from a peer) for shape and size.
+    pub fn validate(&self) -> Result<()> {
+        if self.entries.len() > MAX_ENTRIES {
+            bail!("roster has {} entries (limit {MAX_ENTRIES})", self.entries.len());
+        }
+        if self.tombstones.len() > MAX_TOMBSTONES {
+            bail!("roster has {} tombstones (limit {MAX_TOMBSTONES})", self.tombstones.len());
+        }
+        for (k, e) in &self.entries {
+            if *k != e.id {
+                bail!("roster entry key {} does not match its id {}", k.short(), e.id.short());
+            }
+            if !valid_name(&e.name) {
+                bail!("roster entry {} has an invalid name", e.id.short());
+            }
+        }
+        for (k, t) in &self.tombstones {
+            if *k != t.id {
+                bail!("roster tombstone key does not match its id");
+            }
+        }
+        if self.fleet.relays.len() > MAX_RELAYS {
+            bail!("too many relays in fleet settings");
+        }
+        for r in &self.fleet.relays {
+            if r.len() > MAX_RELAY_URL || r.parse::<iroh::RelayUrl>().is_err() {
+                bail!("fleet settings contain an invalid relay URL");
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)] // for unlink
+    pub fn is_member(&self, id: &MachineId) -> bool {
+        self.entries.contains_key(id) && !self.tombstones.contains_key(id)
+    }
+
+    /// Members (entry and no tombstone), in id order.
+    pub fn members(&self) -> impl Iterator<Item = &Entry> {
+        self.entries.values().filter(|e| !self.tombstones.contains_key(&e.id))
+    }
+
+    /// Merge `other` into `self`. Returns true when anything changed.
+    pub fn merge(&mut self, other: &Roster) -> bool {
+        let before = self.clone();
+        for (id, theirs) in &other.entries {
+            match self.entries.get(id) {
+                Some(ours) if ours.rank() >= theirs.rank() => {}
+                _ => {
+                    self.entries.insert(*id, theirs.clone());
+                }
+            }
+        }
+        for (id, theirs) in &other.tombstones {
+            match self.tombstones.get(id) {
+                Some(ours) if (ours.revoked_at, ours.revoked_by) <= (theirs.revoked_at, theirs.revoked_by) => {}
+                _ => {
+                    self.tombstones.insert(*id, theirs.clone());
+                }
+            }
+        }
+        let rank = |f: &Fleet| (f.updated_at, f.updated_by, f.relays.clone());
+        if rank(&other.fleet) > rank(&self.fleet) {
+            self.fleet = other.fleet.clone();
+        }
+        *self != before
+    }
+
+    /// Add (or re-add with a new name) a machine. Refuses a tombstoned id.
+    pub fn add(&mut self, id: MachineId, name: &str, by: MachineId, now: u64) -> Result<bool> {
+        if !valid_name(name) {
+            bail!("'{name}' is not a valid machine name (use a-z, 0-9 and '-', at most {MAX_NAME})");
+        }
+        if self.tombstones.contains_key(&id) {
+            bail!("machine {} was unlinked; a revoked key can never come back (run 'jaunt reset' there and link again)", id.short());
+        }
+        let mut incoming = Roster::default();
+        let prev = self.entries.get(&id);
+        let entry = Entry {
+            id,
+            name: name.to_string(),
+            added_at: prev.map(|p| p.added_at).unwrap_or(now),
+            added_by: prev.map(|p| p.added_by).unwrap_or(by),
+            named_at: now.max(prev.map(|p| p.named_at + 1).unwrap_or(0)),
+        };
+        if prev.map(|p| p.name == name).unwrap_or(false) {
+            return Ok(false);
+        }
+        incoming.entries.insert(id, entry);
+        Ok(self.merge(&incoming))
+    }
+
+    pub fn rename(&mut self, id: MachineId, name: &str, now: u64) -> Result<bool> {
+        let by = self.entries.get(&id).map(|e| e.added_by).unwrap_or(id);
+        self.add(id, name, by, now)
+    }
+
+    #[allow(dead_code)] // for unlink
+    pub fn revoke(&mut self, id: MachineId, by: MachineId, now: u64) -> bool {
+        let mut incoming = Roster::default();
+        incoming.tombstones.insert(id, Tombstone { id, revoked_at: now, revoked_by: by });
+        self.merge(&incoming)
+    }
+
+    pub fn set_relays(&mut self, relays: Vec<String>, by: MachineId, now: u64) -> bool {
+        let at = now.max(self.fleet.updated_at + 1);
+        let incoming = Roster { fleet: Fleet { relays, updated_at: at, updated_by: Some(by) }, ..Default::default() };
+        self.merge(&incoming)
+    }
+
+    /// Names to show for members. Two machines with the same name are told apart
+    /// deterministically: the earlier-added keeps the plain name, later ones get
+    /// `name-<first 4 hex of id>`.
+    pub fn display_names(&self) -> BTreeMap<MachineId, String> {
+        let mut by_name: BTreeMap<&str, Vec<&Entry>> = BTreeMap::new();
+        for e in self.members() {
+            by_name.entry(&e.name).or_default().push(e);
+        }
+        let mut out = BTreeMap::new();
+        for (name, mut group) in by_name {
+            group.sort_by_key(|a| (a.added_at, a.id));
+            for (i, e) in group.iter().enumerate() {
+                let shown = if i == 0 { name.to_string() } else { format!("{name}-{}", &e.id.to_string()[..4]) };
+                out.insert(e.id, shown);
+            }
+        }
+        out
+    }
+
+    pub fn display_name(&self, id: &MachineId) -> String {
+        self.display_names().remove(id).unwrap_or_else(|| {
+            self.entries.get(id).map(|e| e.name.clone()).unwrap_or_else(|| id.short())
+        })
+    }
+
+    /// Find a member by exact name, unambiguous name prefix, or id prefix (>= 4 hex chars).
+    /// `exclude` (this machine) is never matched.
+    pub fn resolve(&self, query: &str, exclude: Option<&MachineId>) -> Resolve {
+        let names = self.display_names();
+        let candidates: Vec<(&MachineId, &String)> =
+            names.iter().filter(|(id, _)| Some(*id) != exclude).collect();
+        if let Some((id, _)) = candidates.iter().find(|(_, n)| n.as_str() == query) {
+            return Resolve::Found(**id);
+        }
+        let mut hits: BTreeSet<&MachineId> =
+            candidates.iter().filter(|(_, n)| n.starts_with(query)).map(|(id, _)| *id).collect();
+        if hits.is_empty() && query.len() >= 4 && query.bytes().all(|b| b.is_ascii_hexdigit()) {
+            let q = query.to_ascii_lowercase();
+            hits = candidates.iter().filter(|(id, _)| id.to_string().starts_with(&q)).map(|(id, _)| *id).collect();
+        }
+        if hits.len() > 1 {
+            return Resolve::Ambiguous(hits.iter().filter_map(|id| names.get(id).cloned()).collect());
+        }
+        hits.into_iter().next().map(|id| Resolve::Found(*id)).unwrap_or(Resolve::NotFound)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id(b: u8) -> MachineId {
+        MachineId([b; 32])
+    }
+    fn entry(i: u8, name: &str, at: u64, by: u8) -> Entry {
+        Entry { id: id(i), name: name.into(), added_at: at, added_by: id(by), named_at: at }
+    }
+    fn roster(entries: &[Entry], tombs: &[(u8, u64, u8)]) -> Roster {
+        let mut r = Roster::default();
+        for e in entries {
+            r.entries.insert(e.id, e.clone());
+        }
+        for &(i, at, by) in tombs {
+            r.tombstones.insert(id(i), Tombstone { id: id(i), revoked_at: at, revoked_by: id(by) });
+        }
+        r
+    }
+    fn merged(a: &Roster, b: &Roster) -> Roster {
+        let mut x = a.clone();
+        x.merge(b);
+        x
+    }
+
+    fn samples() -> Vec<Roster> {
+        let mut f1 = roster(&[entry(1, "fern", 10, 1)], &[]);
+        f1.fleet = Fleet { relays: vec!["https://r1.example".into()], updated_at: 5, updated_by: Some(id(1)) };
+        let mut f2 = roster(&[entry(2, "moss", 20, 1), entry(1, "fern2", 30, 2)], &[(3, 40, 2)]);
+        f2.fleet = Fleet { relays: vec!["https://r2.example".into()], updated_at: 7, updated_by: Some(id(2)) };
+        let f3 = roster(&[entry(3, "tin", 15, 1), entry(2, "moss", 20, 1)], &[(3, 35, 1), (1, 50, 3)]);
+        vec![Roster::default(), f1, f2, f3]
+    }
+
+    #[test]
+    fn merge_is_commutative() {
+        let s = samples();
+        for a in &s {
+            for b in &s {
+                assert_eq!(merged(a, b), merged(b, a));
+            }
+        }
+    }
+
+    #[test]
+    fn merge_is_associative_and_idempotent() {
+        let s = samples();
+        for a in &s {
+            assert_eq!(merged(a, a), *a);
+            let mut x = a.clone();
+            assert!(!x.merge(a));
+            for b in &s {
+                let ab = merged(a, b);
+                assert_eq!(merged(&ab, b), ab);
+                for c in &s {
+                    assert_eq!(merged(&merged(a, b), c), merged(a, &merged(b, c)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tombstone_wins_and_is_permanent() {
+        let mut a = roster(&[entry(1, "fern", 10, 1), entry(2, "moss", 10, 1)], &[]);
+        assert!(a.is_member(&id(2)));
+        assert!(a.revoke(id(2), id(1), 100));
+        assert!(!a.is_member(&id(2)));
+        // a later re-add from a peer who never heard of the revocation does not resurrect it
+        let stale = roster(&[Entry { named_at: 500, ..entry(2, "moss", 400, 3) }], &[]);
+        a.merge(&stale);
+        assert!(!a.is_member(&id(2)));
+        assert!(a.add(id(2), "moss", id(1), 600).is_err());
+        // earliest tombstone kept
+        let later = roster(&[], &[(2, 900, 3)]);
+        a.merge(&later);
+        assert_eq!(a.tombstones[&id(2)].revoked_at, 100);
+        assert_eq!(a.members().count(), 1);
+    }
+
+    #[test]
+    fn rename_propagates_by_named_at() {
+        let mut a = roster(&[entry(1, "fern", 10, 1)], &[]);
+        let mut b = a.clone();
+        assert!(b.rename(id(1), "bracken", 20).unwrap());
+        assert!(a.merge(&b));
+        assert_eq!(a.entries[&id(1)].name, "bracken");
+        assert_eq!(a.entries[&id(1)].added_at, 10);
+        // same name again: no change
+        assert!(!a.rename(id(1), "bracken", 30).unwrap());
+    }
+
+    #[test]
+    fn fleet_last_writer_wins() {
+        let mut a = Roster::default();
+        let mut b = Roster::default();
+        a.set_relays(vec!["https://a.example".into()], id(1), 100);
+        b.set_relays(vec!["https://b.example".into()], id(2), 200);
+        let ab = merged(&a, &b);
+        assert_eq!(ab.fleet.relays, vec!["https://b.example".to_string()]);
+        assert_eq!(merged(&b, &a), ab);
+        // same timestamp: tie broken by writer id bytes
+        let mut c = Roster::default();
+        c.set_relays(vec!["https://c.example".into()], id(3), 200);
+        assert_eq!(merged(&b, &c).fleet.relays, vec!["https://c.example".to_string()]);
+    }
+
+    #[test]
+    fn ids_compare_as_raw_bytes() {
+        let mut lo = [0u8; 32];
+        lo[31] = 1;
+        let mut hi = [0u8; 32];
+        hi[0] = 1;
+        assert!(MachineId(lo) < MachineId(hi));
+        let s = MachineId(hi).to_string();
+        let parsed: MachineId = s.to_uppercase().parse().unwrap();
+        assert_eq!(parsed, MachineId(hi));
+        assert!("abc".parse::<MachineId>().is_err());
+        assert!("zz".repeat(32).parse::<MachineId>().is_err());
+    }
+
+    #[test]
+    fn name_collisions_are_disambiguated() {
+        let r = roster(&[entry(0xab, "fern", 10, 1), entry(0x12, "fern", 20, 1), entry(3, "moss", 5, 1)], &[]);
+        let names = r.display_names();
+        assert_eq!(names[&id(0xab)], "fern");
+        assert_eq!(names[&id(0x12)], "fern-1212");
+        assert_eq!(names[&id(3)], "moss");
+        assert_eq!(r.resolve("fern", None), Resolve::Found(id(0xab)));
+        assert_eq!(r.resolve("fern-1", None), Resolve::Found(id(0x12)));
+        match r.resolve("fe", None) {
+            Resolve::Ambiguous(v) => assert_eq!(v.len(), 2),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(r.resolve("m", None), Resolve::Found(id(3)));
+        assert_eq!(r.resolve("m", Some(&id(3))), Resolve::NotFound);
+        assert_eq!(r.resolve("0303", None), Resolve::Found(id(3)));
+        assert_eq!(r.resolve("zzz", None), Resolve::NotFound);
+    }
+
+    #[test]
+    fn validate_rejects_bad_input() {
+        let mut r = roster(&[entry(1, "fern", 10, 1)], &[]);
+        assert!(r.validate().is_ok());
+        r.entries.get_mut(&id(1)).unwrap().name = "Bad Name".into();
+        assert!(r.validate().is_err());
+        let mut r = roster(&[entry(1, "fern", 10, 1)], &[]);
+        r.entries.insert(id(2), entry(1, "x", 1, 1));
+        assert!(r.validate().is_err());
+        let mut r = Roster::default();
+        r.fleet.relays = vec!["not a url".into()];
+        assert!(r.validate().is_err());
+        assert!(serde_json::from_str::<Roster>(r#"{"entries":{"zz":{}}}"#).is_err());
+    }
+
+    #[test]
+    fn names() {
+        assert!(valid_name("fern"));
+        assert!(valid_name("a-1"));
+        assert!(!valid_name("-a"));
+        assert!(!valid_name("Fern"));
+        assert!(!valid_name(""));
+        assert!(!valid_name(&"a".repeat(33)));
+        assert!(!valid_name("a b"));
+    }
+}

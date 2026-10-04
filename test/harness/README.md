@@ -14,6 +14,8 @@ cd test/harness
 ./up.sh                     # idempotent; builds jaunt-harness:latest if missing (about 1 min)
 ./prove.sh                  # self-test of the NAT behaviour, exit 0 = all good
 ./jh help                   # helpers
+./relay.sh                  # real iroh-relay in jaunt-relay: https://relay.jaunt.test + QAD udp/7842,
+                            # throwaway CA made now in .state/relay, copied to a b c as /opt/jaunt/relay-ca.crt
 ./jh install ../../target/release/jaunt          # copies into a b c relay at /opt/jaunt/bin (on PATH)
 ./jh exec a jaunt ...       # run things
 ./down.sh                   # removes exactly the 7 containers + 4 networks by name (--image also drops the image)
