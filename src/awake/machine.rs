@@ -6,6 +6,14 @@
 //! for suspend after a short grace in case logind does not do it by itself).
 //!
 //! Everything unknown counts against holding: unknown power, no readable temperature.
+//!
+//! Durations ("hot for 120 s", "on battery for 10 s", "draining for 60 s") are leaky
+//! accumulators, not "since the condition last became true" (L4): the time between two
+//! samples counts towards a condition that held at the earlier sample, and time without it
+//! pays the total back at half speed. So heat that dips below the limit for one sample
+//! every two minutes still trips, and a flapping cable or a weak charger still releases.
+//! After a power-caused release the lock is taken again only once mains has been steady
+//! long enough to pay the accumulators back to zero.
 
 use super::lid::Lid;
 use super::power::Power;
@@ -76,9 +84,16 @@ pub struct State {
     /// Set by a thermal trip; cleared only when the lid is seen open (or host mode is turned off).
     pub latched: bool,
     trip_reason: Option<String>,
-    hot_since: Option<u64>,
-    battery_since: Option<u64>,
-    draining_since: Option<u64>,
+    last_at: Option<u64>,
+    /// The previous sample's conditions: the time since then counts for (or against) them.
+    prev_hot: bool,
+    prev_battery: bool,
+    prev_draining: bool,
+    hot_ms: u64,
+    battery_ms: u64,
+    draining_ms: u64,
+    /// Released because of the power; hold again only once it has been steady a while.
+    power_hold_off: bool,
     suspend_at: Option<u64>,
     retry_at: Option<u64>,
     last_error: Option<String>,
@@ -92,9 +107,14 @@ impl Default for State {
             reason: "host mode is off".into(),
             latched: false,
             trip_reason: None,
-            hot_since: None,
-            battery_since: None,
-            draining_since: None,
+            last_at: None,
+            prev_hot: false,
+            prev_battery: false,
+            prev_draining: false,
+            hot_ms: 0,
+            battery_ms: 0,
+            draining_ms: 0,
+            power_hold_off: false,
             suspend_at: None,
             retry_at: None,
             last_error: None,
@@ -102,12 +122,12 @@ impl Default for State {
     }
 }
 
-fn since(slot: &mut Option<u64>, on: bool, now: u64) -> u64 {
-    if on {
-        now.saturating_sub(*slot.get_or_insert(now))
+/// Count `dt` towards a condition that held over it, or pay back at half speed.
+fn leak(acc: &mut u64, was_on: bool, dt: u64, cap: u64) {
+    if was_on {
+        *acc = acc.saturating_add(dt).min(cap);
     } else {
-        *slot = None;
-        0
+        *acc = acc.saturating_sub(dt / 2);
     }
 }
 
@@ -119,9 +139,18 @@ impl State {
             return if inp.held { vec![Action::Release] } else { vec![] };
         }
 
-        let hot_for = since(&mut self.hot_since, matches!(inp.heat, Heat::Hot(_)), now);
-        let battery_for = since(&mut self.battery_since, inp.power == Power::Battery, now);
-        let draining_for = since(&mut self.draining_since, inp.power == Power::AcDraining, now);
+        let dt = self.last_at.map(|t| now.saturating_sub(t)).unwrap_or(0);
+        self.last_at = Some(now);
+        leak(&mut self.hot_ms, self.prev_hot, dt, lim.hot_for_ms);
+        leak(&mut self.battery_ms, self.prev_battery, dt, lim.ac_debounce_ms.saturating_mul(2));
+        leak(&mut self.draining_ms, self.prev_draining, dt, lim.draining_ms);
+        self.prev_hot = matches!(inp.heat, Heat::Hot(_) | Heat::Critical(_));
+        self.prev_battery = inp.power == Power::Battery;
+        self.prev_draining = inp.power == Power::AcDraining;
+        let (hot_for, battery_for, draining_for) = (self.hot_ms, self.battery_ms, self.draining_ms);
+        if self.power_hold_off && battery_for == 0 && draining_for == 0 {
+            self.power_hold_off = false;
+        }
 
         if inp.lid == Lid::Open {
             self.latched = false;
@@ -130,7 +159,7 @@ impl State {
         match &inp.heat {
             Heat::Critical(why) => self.trip(format!("too hot: {why}")),
             Heat::Hot(why) if hot_for >= lim.hot_for_ms => {
-                self.trip(format!("too hot: {why} for {} s", hot_for / 1000));
+                self.trip(format!("too hot: {why} for about {} s", hot_for / 1000));
             }
             _ => {}
         }
@@ -139,7 +168,9 @@ impl State {
         let blocker: Option<(HostState, String)> = if self.latched {
             Some((HostState::TooHot, self.reason_if_latched()))
         } else {
+            let unsteady = || (HostState::OnBattery, "mains power keeps dropping out; holding again once it has been steady for a while".to_string());
             match &inp.power {
+                Power::Ac | Power::AcDraining if self.power_hold_off => Some(unsteady()),
                 Power::Ac => None,
                 Power::AcDraining if draining_for < lim.draining_ms => None,
                 Power::AcDraining => {
@@ -182,6 +213,9 @@ impl State {
                 let mut acts = Vec::new();
                 if inp.held {
                     acts.push(Action::Release);
+                    if matches!(inp.power, Power::Battery | Power::AcDraining) && !self.latched {
+                        self.power_hold_off = true;
+                    }
                 }
                 if inp.lid == Lid::Closed && !inp.docked {
                     match self.suspend_at {

@@ -99,6 +99,8 @@ fn guard(t: &Tree) -> Guard<Fake> {
         enabled: true,
         state: State::default(),
         mac: false,
+        cpu_seen: false,
+        stuck: Default::default(),
     }
 }
 
@@ -338,21 +340,144 @@ fn hot_for_120s_releases_suspends_and_waits_for_lid_open() {
 }
 
 #[test]
-fn short_heat_spike_does_not_trip() {
+fn short_heat_spikes_with_real_cooling_do_not_trip() {
     let t = Tree::laptop("st6");
     let mut g = guard(&t);
     g.tick(0);
-    t.cpu(95.0);
-    for i in 1..20 {
-        g.tick(i * 5 * S);
+    let mut now = 0;
+    for _ in 0..4 {
+        // 60 s hot, then three minutes cool: the heat is paid back before the next spike.
+        t.cpu(95.0);
+        for _ in 0..12 {
+            now += 5 * S;
+            g.tick(now);
+        }
+        t.cpu(60.0);
+        for _ in 0..36 {
+            now += 5 * S;
+            g.tick(now);
+        }
     }
-    t.cpu(60.0);
-    g.tick(100 * S);
-    t.cpu(95.0);
-    g.tick(105 * S);
-    g.tick(200 * S);
-    assert!(g.backend.holding, "the 120 s window restarts after cooling");
+    assert!(g.backend.holding, "spikes that cool down in between never add up to 120 s");
     assert!(!g.state.latched);
+}
+
+/// L4 (D): a CPU sitting at the limit under fan control, dipping below it for one sample
+/// every two minutes, used to restart the 120 s window forever and never trip.
+#[test]
+fn heat_that_dips_for_one_sample_still_trips() {
+    let t = Tree::laptop("st6b");
+    t.lid("closed");
+    let mut g = guard(&t);
+    g.tick(0);
+    let mut now = 0;
+    let mut tripped_at = None;
+    for _ in 0..8 {
+        for c in std::iter::repeat_n(91.0, 23).chain([88.0]) {
+            t.cpu(c);
+            now += 5 * S;
+            g.tick(now);
+            if g.state.latched && tripped_at.is_none() {
+                tripped_at = Some(now);
+            }
+        }
+    }
+    let at = tripped_at.expect("it must trip");
+    assert!(at <= 300 * S, "tripped only at {} s", at / S);
+    assert!(!g.backend.holding);
+}
+
+/// L4 (A): a loose cable, 10 s on battery and 5 s on mains, over and over. It used to keep
+/// the lock all the time (two thirds of it on battery).
+#[test]
+fn a_flapping_cable_releases_and_stays_released() {
+    let t = Tree::laptop("st6c");
+    let mut g = guard(&t);
+    g.tick(0);
+    let (mut now, mut held_on_battery, mut held) = (0, 0, 0);
+    for _ in 0..240 {
+        // 3 samples a cycle: battery, battery, mains (5 s each).
+        for (i, battery) in [true, true, false].into_iter().enumerate() {
+            let _ = i;
+            if battery { t.ac(0); t.bat("Discharging") } else { t.ac(1); t.bat("Charging") }
+            now += 5 * S;
+            g.tick(now);
+            if g.backend.holding {
+                held += 1;
+                if battery { held_on_battery += 1 }
+            }
+        }
+    }
+    assert!(held <= 6, "held {held} of 720 samples");
+    assert!(held_on_battery <= 4, "held on battery {held_on_battery} times");
+    // Steady mains again: after a while the lock is taken again.
+    t.ac(1);
+    t.bat("Charging");
+    for _ in 0..12 {
+        now += 5 * S;
+        g.tick(now);
+    }
+    assert!(g.backend.holding, "steady mains brings the lock back");
+}
+
+/// L4 (B): a weak charger whose battery alternates draining and charging used to restart
+/// the 60 s window and never count as battery.
+#[test]
+fn a_weak_charger_that_alternates_still_counts_as_battery() {
+    let t = Tree::laptop("st6d");
+    let mut g = guard(&t);
+    g.tick(0);
+    let mut now = 0;
+    for _ in 0..60 {
+        for status in ["Discharging", "Discharging", "Discharging", "Charging"] {
+            t.bat(status);
+            now += 5 * S;
+            g.tick(now);
+        }
+    }
+    assert!(!g.backend.holding, "a charger that cannot keep up is battery power");
+}
+
+/// L3: a sensor read that never returns (a hung driver; a FIFO here) must not freeze the
+/// guard while it holds the lock: the reading counts as unknown and the lock goes.
+#[test]
+fn a_hung_sensor_read_releases_the_lock() {
+    let t = Tree::laptop("st6e");
+    let mut g = guard(&t);
+    g.tick(0);
+    assert!(g.backend.holding);
+    let temp = t.root.join("sys/class/hwmon/hwmon0/temp1_input");
+    fs::remove_file(&temp).unwrap();
+    let c = std::ffi::CString::new(temp.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: mkfifo on a path in the test's own tree.
+    assert_eq!(unsafe { libc_mkfifo(c.as_ptr(), 0o600) }, 0);
+    let started = std::time::Instant::now();
+    let r = g.tick(5 * S);
+    assert!(started.elapsed() < std::time::Duration::from_secs(5), "the tick did not wait for the hung read");
+    assert!(!g.backend.holding, "a hung sensor counts as unknown: the lock is released");
+    assert!(!r.lock_held);
+    // Let the stuck reader go.
+    let _ = std::fs::OpenOptions::new().write(true).open(&temp).map(|mut f| std::io::Write::write_all(&mut f, b"50000\n"));
+}
+
+unsafe extern "C" {
+    #[link_name = "mkfifo"]
+    fn libc_mkfifo(path: *const std::ffi::c_char, mode: u32) -> i32;
+}
+
+/// L12: the CPU sensors vanish but a cool drive still reads: not "cool", but unknown.
+#[test]
+fn losing_the_cpu_sensors_is_unknown_heat() {
+    let t = Tree::laptop("st6f");
+    t.file("sys/class/hwmon/hwmon1/name", "nvme");
+    t.file("sys/class/hwmon/hwmon1/temp1_input", "35000");
+    let mut g = guard(&t);
+    g.tick(0);
+    assert!(g.backend.holding);
+    t.rm("sys/class/hwmon/hwmon0");
+    let r = g.tick(5 * S);
+    assert!(!g.backend.holding, "{r:?}");
+    assert!(r.reason.contains("CPU temperature"), "{}", r.reason);
 }
 
 #[test]

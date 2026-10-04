@@ -78,5 +78,7 @@ pub fn start(paths: &Paths, cfg: &HostConfig) -> Handle {
         enabled: cfg.enabled,
         state: machine::State::default(),
         mac,
+        cpu_seen: false,
+        stuck: Default::default(),
     })
 }

@@ -29,6 +29,10 @@ pub trait Backend: Send {
     /// The lock is held right now (the holder is alive).
     fn held(&mut self) -> bool;
     fn suspend(&mut self) -> Result<(), String>;
+    /// Process id of the lock holder, if one is running (for the daemon's failsafe).
+    fn holder_pid(&mut self) -> Option<i32> {
+        None
+    }
 }
 
 const CMD_TIMEOUT: Duration = Duration::from_secs(3);
@@ -167,6 +171,13 @@ impl Backend for Systemd {
             Some((child, _)) => matches!(child.try_wait(), Ok(None)),
             None => false,
         }
+    }
+
+    fn holder_pid(&mut self) -> Option<i32> {
+        if !self.held() {
+            return None;
+        }
+        self.holder.as_ref().and_then(|(c, _)| i32::try_from(c.id()).ok())
     }
 
     fn suspend(&mut self) -> Result<(), String> {
