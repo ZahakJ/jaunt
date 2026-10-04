@@ -119,7 +119,8 @@ h_link() {
   echo "$code" > "$out.raw"
   [ -n "$tf" ] && code=$(printf '%s' "$code" | sed "$tf")
   echo "$code" > "$out.code"
-  h_exec "$joi" jaunt join "$code" --relay "$RELAY_URL" --yes > "$out.join" 2>&1
+  # The code goes in on stdin, never in argv (where every local user could read it).
+  printf '%s\n' "$code" | h_exec_i "$joi" jaunt join --relay "$RELAY_URL" --yes > "$out.join" 2>&1
   rc=$?
   wait_until 45 h_exec "$inv" grep -q '^exit=' /home/jaunt/link.out
   h_exec "$inv" cat /home/jaunt/link.out > "$out.inv"

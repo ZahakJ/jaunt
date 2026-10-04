@@ -7,7 +7,7 @@ On attach it marks the shell (`KEEP=k42`) so that later probes prove it is the s
 not a new one. Each --step NAME=CMD runs CMD (a host shell command, e.g. "jh drop a 60")
 while the hop stays open, then probes every 2 s by typing `echo R<n>_$((k+1000))_$KEEP`
 until the expanded answer appears; the time from CMD's end to that answer is the recovery
-time. Output: PASS/FAIL lines and one `STEP name=<n> recovered_s=<x> link_lost=<yes|no>`
+time. Output: PASS/FAIL lines and one `STEP name=<n> recovered_s=<x> link_lost=<yes|no> stall_shown=<yes|no>`
 line per step. Exit status 0 = all passed.
 
   --expect-first RE   before typing anything, RE must appear (a re-hop repaints old output)
@@ -158,9 +158,10 @@ def main():
             if not hop.alive:
                 break
         lost = "yes" if hop.find(r"link lost", start) else "no"
+        stall = "yes" if hop.find(r"no answer for \d+s", start) else "no"
         hop.mark = len(hop.buf)
         rs = f"{recovered:.1f}" if recovered is not None else "none"
-        print(f"STEP name={name} recovered_s={rs} link_lost={lost}", flush=True)
+        print(f"STEP name={name} recovered_s={rs} link_lost={lost} stall_shown={stall}", flush=True)
         check(recovered is not None, f"[{name}] same shell answers again ({rs} s after the disruption ended, link lost shown: {lost})")
         if recovered is None:
             print(hop.text(start)[-1500:])

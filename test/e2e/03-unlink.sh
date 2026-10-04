@@ -2,8 +2,11 @@
 # Revocation (DESIGN §7) in the Docker NAT harness. a, b, c are linked with the ritual
 # (c through b). a unlinks c: c's shell and command on b are ended at once, a and b refuse
 # c, c cannot come back by syncing or by pairing with its old key. Then c is linked again
-# with a new key, b is frozen, a unlinks c meanwhile, and b learns of it on return; the
-# time that takes is printed (the window in which b still accepts c).
+# with a new key and opens a tmux session on a; b is frozen, a unlinks c meanwhile with
+# --kill-sessions (c's session on a ends; the reminder about what revocation does not undo
+# is printed). The moment b thaws, c tries to run a command on b five times: none may get
+# through (b settles with a before serving anyone after an absence). b learns of it; the
+# time that takes is printed.
 #   JAUNT_BIN=target/release/jaunt test/e2e/03-unlink.sh       (KEEP_HARNESS=1 leaves it up)
 set -uo pipefail
 E2E_NAME=03-unlink
@@ -94,17 +97,38 @@ note "phase 2: c gets a new key and is linked again; b is frozen while a unlinks
 check "c fresh (new key)" h_fresh c
 check "link a <- c (new key)" h_link a c
 check "a, b, c all connected again" wait_until 120 all_connected
-"$HARNESS/jh" freeze b 45 > "$OUT-freeze.log" 2>&1 &
+docker exec -d -u jaunt jaunt-c "${H_ENV[@]}" TERM=xterm python3 -c 'import pty; pty.spawn(["jaunt", "a:c2sess"])'
+check "c created tmux session c2sess on a" wait_until 20 h_exec a tmux -L jaunt-test has-session -t c2sess
+h_exec a tmux -L jaunt-test new-session -d -s owners 2>/dev/null
+"$HARNESS/jh" freeze b 60 > "$OUT-freeze.log" 2>&1 &
 FREEZE=$!
 sleep 3
-h_jaunt a unlink c > "$OUT-unlink2.out" 2>&1
-check "a: jaunt unlink c succeeds while b is frozen" [ $? = 0 ]
+h_jaunt a unlink c --kill-sessions > "$OUT-unlink2.out" 2>&1
+check "a: jaunt unlink c --kill-sessions succeeds while b is frozen" [ $? = 0 ]
 sed 's/^/    a| /' "$OUT-unlink2.out"
 check "a: b has not heard yet" grep -q "not heard yet: b" "$OUT-unlink2.out"
+check "a: the session c created on a was ended" sh -c '! docker exec -u jaunt jaunt-a tmux -L jaunt-test has-session -t c2sess 2>/dev/null'
+check "a: a session c did not create is kept" h_exec a tmux -L jaunt-test has-session -t owners
+check "a: unlink reminds what revocation does not undo" grep -q "does not undo" "$OUT-unlink2.out"
 wait "$FREEZE"
 t0=$SECONDS
-note "b thawed; c tries b right away (it may still get in: that is the window)"
-if h_jaunt c run b -- true >/dev/null 2>&1; then note "c reached b before b heard"; else note "c did not reach b"; fi
+# The moment b thaws, c sends five commands at once. The freeze is 60 s so that neither a
+# nor c has a dial to b in flight then (each daemon's dial times out after 20 s and is
+# retried every 30 s): c's fresh handshake reaches b at once, while b itself only gets to
+# hear from a by dialling it. Without settling, c's commands are served in that gap.
+note "b thawed; c hammers b with 'run' right away (5 at once); none may get through"
+HAMMER=()
+for i in 1 2 3 4 5; do
+  h_jaunt c run b -- echo "GOT-IN-$i" > "$OUT-hammer-$i.out" 2>&1 &
+  HAMMER+=($!)
+done
+for p in "${HAMMER[@]}"; do wait "$p"; done
+got_in=0
+for i in 1 2 3 4 5; do
+  if grep -q "^GOT-IN-$i\$" "$OUT-hammer-$i.out"; then got_in=$((got_in + 1)); fi
+  sed "s/^/    c[$i]| /" "$OUT-hammer-$i.out" | head -2
+done
+check "c never got a command through to the thawed b ($got_in of 5 did)" [ "$got_in" = 0 ]
 # Both c's share the name "c"; once b has the new tombstone, no member called c is left.
 check "b learns of the revocation after its return" wait_until 120 h_not_knows b c
 note "b learned $((SECONDS - t0)) s after thawing"

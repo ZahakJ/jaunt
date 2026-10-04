@@ -2,7 +2,9 @@
 # Paths (DESIGN §2, §5) in the Docker NAT harness: a <-> b direct; c behind the hard NAT is
 # relayed in both hard modes (symmetric NAT, and UDP blocked except to the relay); with the
 # relay down an existing direct stream keeps flowing, and what happens to new connections
-# is recorded; with the relay back everything recovers (times recorded).
+# is recorded; a daemon restarted while the relay is down is found again on the same direct
+# path (each daemon remembers its peers' last direct addresses as dial hints, and re-binds
+# its own last port); with the relay back everything recovers (times recorded).
 #   JAUNT_BIN=target/release/jaunt test/e2e/06-paths.sh       (KEEP_HARNESS=1 leaves it up)
 set -uo pipefail
 E2E_NAME=06-paths
@@ -60,9 +62,14 @@ h_jaunt a run c -- true > "$OUT-relaydown-c.out" 2>&1; sed 's/^/    a| /' "$OUT-
 h_jaunt a check > "$OUT-check-a-relaydown.out" 2>&1
 check "jaunt check on a reports the relay problem (exit 1)" [ $? = 1 ]
 sed 's/^/    a| /' "$OUT-check-a-relaydown.out" | grep -E '^    a\| fail' || true
-note "b's daemon restarts while the relay is down: can a reach it again without the relay?"
+check "a keeps b's direct address as a dial hint (state/addrs.json, 0600)" \
+  sh -c '[ "$(docker exec jaunt-a stat -c %a /home/jaunt/jh/state/addrs.json)" = 600 ] && docker exec jaunt-a grep -q "198.51.100.12:" /home/jaunt/jh/state/addrs.json'
+note "b's daemon restarts while the relay is down: a must find it again on the direct path"
 restart b
-if wait_until 40 ran_on a b; then note "a reached the restarted b without the relay"; row relay_down a_to_restarted_b works; else note "a cannot reach the restarted b without the relay (no address lookup but the relay)"; row relay_down a_to_restarted_b fails; fi
+t_rb=$SECONDS
+check "a reaches the restarted b without the relay (address hints)" wait_until 40 ran_on a b
+row relay_down a_to_restarted_b_s "$((SECONDS - t_rb))"
+check "b -> a is DIRECT again with the relay still down" wait_until 20 h_is_state b a direct
 for m in a; do note "jaunt ls on $m (relay down)"; h_jaunt "$m" ls | cut -f1-5 | sed 's/^/    /'; done
 row relay_down down_for_s "$((SECONDS - t_down))"
 

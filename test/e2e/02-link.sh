@@ -54,6 +54,7 @@ right=$(h_exec b awk '/^code:/{print $2; exit}' /home/jaunt/link.out)
 h_exec c jaunt join "$right" --relay "$RELAY_URL" --yes > "$OUT-burnt.join" 2>&1
 check "the right code fails after the wrong guess" [ $? != 0 ]
 sed 's/^/    c| /' "$OUT-burnt.join"
+check "a code given in argv draws a warning about the process list" grep -q "visible to other users" "$OUT-burnt.join"
 check "c is still alone" alone c
 
 note "c joins through b; a must learn of c without being touched"
