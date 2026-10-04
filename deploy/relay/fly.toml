@@ -1,0 +1,38 @@
+# Fly.io app for the jaunt relay. UNTESTED: see README, "Fly.io".
+# fly launch --no-deploy --copy-config; fly ips allocate-v4 (dedicated, needed for UDP); fly deploy
+app = "CHANGE-ME-jaunt-relay"
+primary_region = "ams"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  # Fly delivers UDP only to sockets bound on the fly-global-services address; see README.
+  RUST_LOG = "info"
+
+[mounts]
+  source = "relay_certs"
+  destination = "/var/lib/iroh-relay"
+
+# Raw TCP (no Fly TLS termination): the relay does its own TLS and ACME.
+[[services]]
+  internal_port = 443
+  protocol = "tcp"
+  [[services.ports]]
+    port = 443
+
+[[services]]
+  internal_port = 80
+  protocol = "tcp"
+  [[services.ports]]
+    port = 80
+
+[[services]]
+  internal_port = 7842
+  protocol = "udp"
+  [[services.ports]]
+    port = 7842
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

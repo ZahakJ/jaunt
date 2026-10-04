@@ -1,7 +1,8 @@
-# jaunt internals (stage 1: core, stage 2: trust)
+# jaunt internals
 
-What the core provides for the next stages to build on. DESIGN.md is the contract; this
-file records how stage 1 implemented it and the APIs other modules consume.
+DESIGN.md is the contract; this file records how it was implemented (stage 1: core,
+stage 2: trust, stage 3: look, host mode, services; stage 4: integration, release) and the
+APIs modules consume from each other.
 
 ## Files and paths (`src/paths.rs`)
 
@@ -38,7 +39,18 @@ service, non-member, not implemented, bad session name… all in words). Service
 | `ping` | host sends `Json` `PingInfo {name, version, sessions, host, time_ms}` |
 | `shell {session, term, cols, rows, env}` | `Data` both ways, `Resize` c→h, `Notice` h→c, final `Exit` h→c |
 | `exec {argv}` | `Data` (stdin c→h / stdout h→c), `Stderr` h→c, `Eof` c→h, final `Exit` |
-| `tcp {port}`, `copy {}` | refused: "not implemented yet" |
+| `tcp {port}` | host connects to 127.0.0.1:port (then ::1) *before* replying (a closed port is a refusal in words); then `Data` both ways, `Eof` = half-close each way; a side finishes the stream only when both directions are done (`src/services/tcp.rs`) |
+| `copy {op: push\|pull, path}` | the sender (client for push, host for pull) sends `Json` messages tagged `m`: `plan {name, files, bytes}`, then per entry `entry {path, kind: file\|dir\|symlink, mode, size, mtime, target}` followed for a file by exactly `size` bytes of `Data`, `skip {path, reason}` for what it could not send, `done` (or `abort {reason}`); for a push the host answers `written {files, bytes}` or `abort` (`src/services/copy.rs`) |
+
+Copy receiving (`src/services/tree.rs`): entry paths are relative, `/`-separated, plain
+components only (no `..`, `.`, empty, absolute, NUL; ≤ 4096 bytes, ≤ 128 deep, ≤ 2 million
+entries); before each write every directory between the copy's root and the entry is
+checked with lstat to be a real directory, so a received symlink is never written through;
+files go to a temp file in the same directory (0600) and are renamed into place with the
+sent mode (permission bits only, setuid/setgid/sticky dropped) and mtime; directory modes
+are applied last. If the destination is an existing directory the tree goes inside it
+under the plan's `name`; on a pull the client requires that name to equal the basename it
+asked for. Remote paths: relative and `~/…` are under the daemon's `$HOME`.
 
 If the stream dies before `Exit`, the host kills the process group (SIGHUP, SIGKILL after 2 s);
 for shells that is the tmux client, so the tmux session survives.
@@ -57,6 +69,7 @@ request per connection. Requests (`IpcRequest`, tagged by `op`):
 | `{"op":"rename","name":"x"}` | `ok` / `error` |
 | `{"op":"set_relays","relays":["https://..."]}` | `ok` / `error` |
 | `{"op":"shutdown"}` | `ok`, then the daemon exits |
+| `{"op":"set_host","on":true}` | `ok`; host mode saved in config.toml and applied at once (`src/awake/`). `StatusSnapshot.host` is a `HostReport {state, reason, on_lid_close, lock_held, lid, power, hottest}`; `state` is `off`/`awake`/`on_battery`/`too_hot`/`will_sleep`, and peers get `HostState::label()` in `PingInfo.host` |
 
 | `{"op":"link","yes":false}` | a stream of `pair` updates (below); at step `confirm` the daemon waits for `{"op":"pair_answer","accept":true\|false}` on the same socket (not with `yes`); ends with `ok` or `error`. Closing the socket cancels |
 | `{"op":"join","code":"4127-tremor-kudos","relays":[...],"yes":false}` | same conversation as `link` |
@@ -76,8 +89,10 @@ PeerStatus { id, name, state: direct|relay|connecting|offline, remote_addr?, add
   (1 sample/s, last 60), connected_since_ms?, last_seen_ms?, version?, sessions?, host?,
   last_error? }
 ```
-Peers are roster members other than this machine, sorted by name. `host` is always null
-until the awake stage fills `PingInfo.host`.
+Peers are roster members other than this machine, sorted by name. A peer's `host` is the
+`HostState::label()` it reported in its last `PingInfo` (`off`, `awake`, `on battery`, `too
+hot`, `will sleep on lid close`); `sessions` is the number of tmux sessions on its jaunt tmux
+server (cached 5 s). `StatusSnapshot.host` is this machine's own `HostReport`.
 
 `Event` = `{seq, t_ms, peer?: {id,name}, event: <kind>, ...fields}`; kinds:
 `daemon_started {version}`, `handshake {incoming, path}`, `path_changed {from, to,
@@ -204,6 +219,21 @@ first run the revoked machine did get one command through to b inside the window
 it fully would need a machine to sync with another member before serving anyone after a
 long absence; not done.
 
+## `jaunt check` (`src/check.rs`)
+
+IPC `{"op":"check"}` → `{"kind":"check", net, contacts, relay_ips}`: `net` is iroh's latest
+net report (QAD over IPv4/IPv6, public address, whether the mapping varies per destination,
+per-relay probe latencies for `https` / `qad_ipv4` / `qad_ipv6`); `contacts` lists every
+remote address of a QUIC path the daemon has used (recorded once a second per live
+connection, with the peer's name) plus the daemon's open TCP/UDP sockets with a remote end
+(from `/proc/self/fd` and `/proc/self/net/{tcp,udp}[6]`); `relay_ips` is what the relay host
+names resolve to now. The client prints `ok` / `warn` / `fail` / `info` lines: version, key
+and directory permissions, tmux, the systemd user unit (not consulted under `JAUNT_HOME`),
+daemon, relay probe and connection, UDP address discovery and hard-NAT warning, each peer's
+path, the contact audit (anything that is not the relay, a linked machine, loopback or the
+system resolver is a warning), and the awake guard's prerequisites. Exit 1 if any `fail`.
+The daemon is never started by `check`.
+
 ## Client side
 
 - Auto-start: if the socket does not answer, `jaunt` starts `jaunt daemon` detached
@@ -213,9 +243,44 @@ long absence; not done.
   SIGTERM/SIGHUP; SIGWINCH → `Resize`; `Enter ~ .` / `Enter ~ ?` / `~~`; when the stream
   dies the client keeps the terminal, shows one status line and retries with backoff
   1–10 s; `~.` gives up during retry too.
-- UI seam (`src/ui/mod.rs`): `ls_plain` (stable tab-separated: name, state, rtt, host,
-  sessions, id; this machine first with state `self`), `ls_pretty` (placeholder = plain),
-  `hop_banner_in/out`, `link_lost_line`. The UI stage replaces bodies, not signatures.
+- UI (`src/ui/`): drawn by hand on a cell grid (`canvas.rs`, per-cell diffs, synchronized
+  updates), no TUI crate. `theme.rs` picks the colour mode (`JAUNT_COLOR=truecolor|16|none`
+  forces one; `NO_COLOR`/`--no-color`; off a terminal no escapes at all) and the glyph set
+  (`JAUNT_ASCII=1` or a non-UTF-8 locale → ASCII). `model.rs` turns a `StatusSnapshot` plus
+  the event stream into what is drawn; `mesh.rs` draws the tree (this machine as hub, a
+  link per peer styled by path, latency and sparkline, the peer column with host state and
+  sessions); `view.rs`/`live.rs` are the live view (bare `jaunt` on a terminal, and the
+  hidden `jaunt pick` for the tmux popup: Enter opens the hop in a new tmux window);
+  `ls.rs` is `jaunt ls` on a terminal; `ritual.rs` is what `jaunt link`/`join` show on a
+  terminal (off a terminal they print the plain lines `02-link.sh` parses); `demo.rs` is
+  `jaunt demo mesh|link|ls|hop [--at S] [--join]` on simulated data; `tmux.rs` is
+  `jaunt tmux-setup`. `ls_plain` stays stable: tab-separated name, state, rtt, host,
+  sessions, id; this machine first with state `self`.
+- A hop from inside tmux prints a one-time hint about the prefix (marker
+  `state/tmux-hint-shown`), unless the local tmux has sourced `jaunt.tmux` (`@jaunt_tmux`).
+- Host mode (`src/awake/`, `jaunt host on|off|status`): see `docs/awake.md`. The lock is a
+  `systemd-inhibit` child on a pipe from the daemon, so any daemon death releases it.
+
+## Install, uninstall, release
+
+- `scripts/build-release.sh`: static x86_64 musl binary built in a throwaway `debian:12`
+  container with rustup (toolchain pinned, default 1.97.1); caches under
+  `target/musl-build/` (about 1.8 GB); output `dist/jaunt-x86_64-linux-musl` and `.sha256`.
+  First build 3 min with `-j 4`; static-pie, 10.5 MB (10 466 824 bytes) with rustc 1.97.1.
+  The whole e2e suite passes with it (the harness installs a binary under its file name, so
+  copy it to a file called `jaunt` first).
+- `install.sh` (POSIX sh, no root): downloads the release asset and its `.sha256` from
+  GitHub (`JAUNT_REPO`, `--version TAG`, `JAUNT_BASE_URL` for another base, `file://`
+  works), falls back to `gh release download` on a 404 (private repository), or takes
+  `--from-file`. Verifies the checksum, writes `~/.local/bin/jaunt` atomically (`--bin-dir`),
+  writes `name`/`relays` into config.toml for `--name`/`--relay` (keeps values already
+  there), and starts nothing unless `--up`; otherwise it prints the next two commands.
+- `jaunt uninstall [--yes|--keep-key]`: stops the service or daemon, removes the unit,
+  config, state and runtime directories and the binary (only `~/.local/bin/jaunt`, or
+  `$JAUNT_HOME/bin/jaunt`, and only if it is the running binary); asks before deleting the
+  key and roster (keeps them off a terminal); says to `jaunt unlink <name>` from another
+  machine. tmux sessions are left alone.
+- `deploy/relay/`: Dockerfile, `relay.toml`, `fly.toml` and the three hosting options.
 
 ## Tests
 
@@ -234,5 +299,14 @@ long absence; not done.
 - `test/e2e/03-unlink.sh`: harness: c's shell and command on b ended by `a unlink c`, c
   refused by a and b, cannot come back by syncing or by pairing with its old key; a frozen b
   learns of a later unlink on return (window printed).
+- `test/e2e/04-09`, `run-all.sh` (stage 3): hop, onward hop and re-hop; continuity through
+  link drops, roams, freezes and a daemon restart; paths (hard NAT modes, relay down and
+  back); services (run, cp, fwd, pipe + OpenSSH, throughput); no-contact audit from outside
+  (conntrack and iptables counters); keystroke latency (writes `docs/measurements.md`).
+  Helpers: `hop_session.py` (PTY driver run on the host through `docker exec -it`, so
+  disruptions run on the host meanwhile), `keystroke.py`, and in `lib.sh` `h_mesh`,
+  `h_daemon_restart` (waits for the old daemon to exit: it holds the lock for up to 3 s).
+- `scripts/capture.sh [--readme]`: demo views × sizes × colour modes rendered to PNG;
+  `scripts/capture-live.sh`: the real mesh view on harness machine a (b direct, c relayed).
 - `test/e2e/01-core.sh`: Docker harness with a TLS+QAD iroh-relay (`test/harness/relay.sh`,
   throwaway CA made at run time): a⇄b direct, c relayed, roster spread, run, relayed hop.

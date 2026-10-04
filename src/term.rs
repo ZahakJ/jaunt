@@ -67,6 +67,53 @@ pub fn size() -> (u16, u16) {
     }
 }
 
+/// Copies stdin into a channel from a thread that polls with a timeout, so it can be
+/// stopped (dropped) without leaving a read blocked on the terminal.
+pub struct StdinPump {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl StdinPump {
+    pub fn start(tx: tokio::sync::mpsc::Sender<Vec<u8>>) -> StdinPump {
+        use std::sync::atomic::Ordering;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = stop.clone();
+        let thread = std::thread::spawn(move || {
+            use rustix::event::{PollFd, PollFlags, Timespec, poll};
+            let stdin = rustix::stdio::stdin();
+            let timeout = Timespec { tv_sec: 0, tv_nsec: 50_000_000 };
+            let mut buf = vec![0u8; 8192];
+            while !flag.load(Ordering::Relaxed) {
+                let mut fds = [PollFd::new(&stdin, PollFlags::IN)];
+                match poll(&mut fds, Some(&timeout)) {
+                    Ok(0) | Err(rustix::io::Errno::INTR) => continue,
+                    Ok(_) => {}
+                    Err(_) => return,
+                }
+                match rustix::io::read(stdin, &mut buf) {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => {
+                        if tx.blocking_send(buf[..n].to_vec()).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+        StdinPump { stop, thread: Some(thread) }
+    }
+}
+
+impl Drop for StdinPump {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum EscapeAction {
     Disconnect,

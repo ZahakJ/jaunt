@@ -1,5 +1,6 @@
 //! jaunt: hop between your own machines.
 
+mod awake;
 mod check;
 mod children;
 mod cli_trust;
@@ -20,6 +21,7 @@ mod systemd;
 mod term;
 mod trust;
 mod ui;
+mod uninstall;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -63,6 +65,20 @@ enum Cmd {
         #[arg(last = true, required = true)]
         argv: Vec<String>,
     },
+    /// Copy files or directories; one side is machine:path (`jaunt cp notes.txt fern:docs/`).
+    Cp { src: String, dst: String },
+    /// Forward a local port to a machine's loopback: `jaunt fwd fern 8080[:9090]`.
+    Fwd {
+        machine: String,
+        /// <port>[:<localport>]
+        spec: String,
+    },
+    /// stdin/stdout to a machine's loopback port (default 22), for `ProxyCommand jaunt pipe %h`.
+    Pipe {
+        machine: String,
+        #[arg(default_value_t = 22)]
+        port: u16,
+    },
     /// Rename this machine.
     Name { name: String },
     /// Invite a machine into the mesh: shows a code for 'jaunt join' on the new machine.
@@ -102,6 +118,11 @@ enum Cmd {
     },
     /// Diagnose: key, daemon, relay, tmux, peers.
     Check,
+    /// Host mode: keep this laptop awake and reachable with the lid closed while on mains power.
+    Host {
+        #[command(subcommand)]
+        action: Option<HostCmd>,
+    },
     /// Forget this machine's identity and roster and start with a new key.
     Reset {
         #[arg(long)]
@@ -112,6 +133,31 @@ enum Cmd {
         #[command(subcommand)]
         action: DebugCmd,
     },
+    /// The mesh view and linking ritual on simulated data: mesh, link or ls.
+    Demo {
+        #[arg(default_value = "mesh")]
+        what: String,
+        /// Freeze at this many seconds into the story (for captures).
+        #[arg(long)]
+        at: Option<f64>,
+        /// `demo link`: show the joining side.
+        #[arg(long)]
+        join: bool,
+    },
+    /// Remove jaunt from this machine: service, binary, config, state (asks about the key).
+    Uninstall {
+        /// Also delete the key and roster without asking.
+        #[arg(long)]
+        yes: bool,
+        /// Keep the key and roster without asking.
+        #[arg(long)]
+        keep_key: bool,
+    },
+    /// Install the tmux snippet (prefix+J picker, F12 key passthrough) into jaunt's config.
+    TmuxSetup,
+    /// The mesh view as a picker for a tmux popup: Enter opens the hop in a new window.
+    #[command(hide = true)]
+    Pick,
     #[command(external_subcommand)]
     External(Vec<String>),
 }
@@ -126,6 +172,16 @@ enum RelayCmd {
         #[arg(long)]
         ca: Option<PathBuf>,
     },
+}
+
+#[derive(Subcommand)]
+enum HostCmd {
+    /// Hold the lid lock while on mains power and not too hot (persisted).
+    On,
+    /// Stop holding it; the machine sleeps on lid close as usual.
+    Off,
+    /// What is true right now, what closing the lid would do, and what is missing.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -153,6 +209,7 @@ fn init_logging(daemon: bool) {
 
 fn main() {
     let cli = Cli::parse();
+    ui::theme::set_no_color_flag(cli.no_color);
     let daemon = matches!(cli.cmd, Some(Cmd::Daemon));
     init_logging(daemon);
     let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
@@ -184,7 +241,7 @@ fn split_target(t: &str) -> (&str, Option<&str>) {
     }
 }
 
-async fn hop(paths: &Paths, target: &str) -> Result<i32> {
+pub(crate) async fn hop(paths: &Paths, target: &str) -> Result<i32> {
     let (machine, session) = split_target(target);
     let session = match session {
         Some(s) => s.to_string(),
@@ -199,7 +256,12 @@ async fn hop(paths: &Paths, target: &str) -> Result<i32> {
 async fn dispatch(cli: Cli) -> Result<i32> {
     let paths = Paths::from_env()?;
     match cli.cmd {
+        None if term::stdout_is_tty() && term::stdin_is_tty() => ui::live::run(&paths, false).await,
         None => ls(&paths, false).await,
+        Some(Cmd::Pick) => ui::live::run(&paths, true).await,
+        Some(Cmd::Demo { what, at, join }) => ui::demo::run(&what, at, join).await,
+        Some(Cmd::Uninstall { yes, keep_key }) => uninstall::run(&paths, uninstall::check_flags(yes, keep_key)?).await,
+        Some(Cmd::TmuxSetup) => ui::tmux::setup(&paths),
         Some(Cmd::Daemon) => {
             daemon::run(paths).await?;
             Ok(0)
@@ -218,6 +280,14 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             hop(&paths, &args[0]).await
         }
         Some(Cmd::Run { machine, argv }) => services::run(&paths, &machine, argv).await,
+        Some(Cmd::Cp { src, dst }) => services::copy::cp(&paths, &src, &dst).await,
+        Some(Cmd::Fwd { machine, spec }) => services::tcp::fwd(&paths, &machine, &spec).await,
+        Some(Cmd::Pipe { machine, port }) => {
+            if port == 0 {
+                bail!("port 0 is not a port");
+            }
+            services::tcp::pipe(&paths, &machine, port).await
+        }
         Some(Cmd::Name { name }) => {
             println!("{}", ipc::call_ok(&paths, &IpcRequest::Rename { name }).await?);
             Ok(0)
@@ -229,6 +299,11 @@ async fn dispatch(cli: Cli) -> Result<i32> {
         Some(Cmd::Leave { yes }) => cli_trust::leave(&paths, yes).await,
         Some(Cmd::Check) => Ok(if check::run(&paths).await? > 0 { 1 } else { 0 }),
         Some(Cmd::Reset { yes }) => reset(&paths, yes).await,
+        Some(Cmd::Host { action }) => match action {
+            Some(HostCmd::On) => awake::cli::set(&paths, true).await,
+            Some(HostCmd::Off) => awake::cli::set(&paths, false).await,
+            None | Some(HostCmd::Status) => awake::cli::status(&paths).await,
+        },
         Some(Cmd::Debug { action }) => debug(&paths, action).await,
     }
 }

@@ -1,6 +1,6 @@
-//! Client side of `jaunt link`, `join`, `unlink`, `leave`: send the request, print each
-//! step as a plain line, ask the human at the sigil check. The UI stage can replace the
-//! `say_*` functions; the conversation itself is the IPC described in docs/internals.md.
+//! Client side of `jaunt link`, `join`, `unlink`, `leave`: send the request, show each
+//! step (`ui::ritual`), ask the human at the sigil check. The conversation itself is the
+//! IPC described in docs/internals.md.
 
 use std::io::Write;
 
@@ -10,128 +10,64 @@ use tokio::net::unix::OwnedWriteHalf;
 use crate::config::Config;
 use crate::pair::code::Code;
 use crate::paths::Paths;
-use crate::proto::{self, FrameType, IpcRequest, IpcResponse, MAX_FRAME, PairRole, PairStep, PairUpdate, UnlinkReport};
+use crate::proto::{self, FrameType, IpcRequest, IpcResponse, MAX_FRAME, PairRole, UnlinkReport};
+use crate::ui::ritual::{Input as RitualInput, Ritual};
 use crate::{ipc, net, term};
-
-fn ascii() -> bool {
-    std::env::var_os("JAUNT_ASCII").is_some_and(|v| !v.is_empty() && v != "0")
-}
-
-fn sigil_lines(sigil: &[String]) -> Vec<String> {
-    let (on, off) = if ascii() { ("##", "  ") } else { ("██", "  ") };
-    sigil.iter().map(|row| row.chars().map(|c| if c == '#' { on } else { off }).collect()).collect()
-}
-
-/// One pairing step as plain lines.
-pub fn say_step(u: &PairUpdate) -> Vec<String> {
-    let inviter = u.role == PairRole::Inviter;
-    match &u.step {
-        PairStep::Waiting { code, relays, first_machine, .. } => {
-            let mut v = Vec::new();
-            if *first_machine {
-                v.push("this is the first machine: the mesh starts here".into());
-            }
-            v.push(format!("code: {code}   (works once, for 5 minutes)"));
-            let relay = relays.first().map(|r| format!(" --relay {r}")).unwrap_or_default();
-            v.push(format!("on the new machine run:  jaunt join {code}{relay}"));
-            v.push("waiting for the other machine...".into());
-            v
-        }
-        PairStep::Dialing { relays } => vec![format!("looking for the inviting machine through {}", relays.join(", "))],
-        PairStep::Rendezvous => vec!["rendezvous: the two machines are connected".into()],
-        PairStep::KeyExchange => vec!["key exchange done".into()],
-        PairStep::Sealed { other: peer } => vec![format!("identities sealed: {} ({})", peer.name, peer.id.short())],
-        PairStep::Confirm { other: peer, sigil, words, .. } => {
-            let mut v = vec![format!("compare with the screen of {}:", peer.name), String::new()];
-            v.extend(sigil_lines(sigil).into_iter().map(|l| format!("    {l}")));
-            v.push(String::new());
-            v.push(format!("    {}", words.join(" ")));
-            v.push(String::new());
-            v
-        }
-        PairStep::Confirmed { here: true } => vec!["confirmed here".into()],
-        PairStep::Confirmed { here: false } => vec!["confirmed on the other machine".into()],
-        PairStep::Linked { other: peer, members } => {
-            if inviter {
-                vec![format!("linked: {} joined the mesh ({members} machines)", peer.name)]
-            } else {
-                vec![format!("linked through {}: the mesh has {members} machines", peer.name)]
-            }
-        }
-        PairStep::FanOut { machine: peer, ok: true, .. } => vec![format!("  told {}", peer.name)],
-        PairStep::FanOut { machine: peer, ok: false, detail } => vec![format!("  not yet told {}: {detail}", peer.name)],
-        PairStep::FanOutDone { told, not_yet } => {
-            if *told + *not_yet == 0 { vec![] } else { vec![format!("{told} told, {not_yet} not yet")] }
-        }
-        PairStep::Failed { .. } => vec![],
-    }
-}
-
-fn ask_same() -> bool {
-    print!("Same sigil and words on both screens? [y/N] ");
-    let _ = std::io::stdout().flush();
-    let mut line = String::new();
-    if std::io::stdin().read_line(&mut line).is_err() {
-        return false;
-    }
-    matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
-}
 
 async fn send(wr: &mut OwnedWriteHalf, req: &IpcRequest) -> Result<()> {
     proto::write_json(wr, FrameType::Json, req).await?;
     Ok(())
 }
 
-/// The link/join conversation. Returns the exit code.
+/// The link/join conversation, shown by `ui::ritual`. Returns the exit code.
 async fn pair(paths: &Paths, req: IpcRequest, yes: bool) -> Result<i32> {
     if !yes && !term::stdin_is_tty() {
         bail!("linking needs a terminal to compare the sigils (--yes skips that check; for tests only)");
     }
+    let (role, code) = match &req {
+        IpcRequest::Join { code, .. } => (PairRole::Joiner, Some(code.clone())),
+        _ => (PairRole::Inviter, None),
+    };
     let s = ipc::connect(paths).await?;
+    let me = crate::status(paths).await.map(|s| s.me.name).unwrap_or_else(|_| crate::config::default_name());
     let (rd, mut wr) = s.into_split();
     send(&mut wr, &req).await?;
     let mut frames = proto::frame_reader(rd);
-    let mut asking: Option<tokio::task::JoinHandle<bool>> = None;
-    let mut out = std::io::stdout();
+    let mut view = Ritual::start(role, &me, code, yes);
     loop {
         tokio::select! {
             f = frames.recv() => {
                 let f = match f {
                     Some(Ok(f)) => f,
-                    Some(Err(e)) => bail!("lost the daemon: {e}"),
-                    None => bail!("the daemon closed the connection"),
+                    Some(Err(e)) => {
+                        view.finish(false, &format!("lost the daemon: {e}")).await;
+                        return Ok(1);
+                    }
+                    None => {
+                        view.finish(false, "the daemon closed the connection").await;
+                        return Ok(1);
+                    }
                 };
                 match proto::parse_json::<IpcResponse>(&f.payload, MAX_FRAME)? {
-                    IpcResponse::Pair(u) => {
-                        for l in say_step(&u) {
-                            writeln!(out, "{l}")?;
-                        }
-                        out.flush()?;
-                        if matches!(u.step, PairStep::Confirm { .. }) && !yes {
-                            asking = Some(tokio::task::spawn_blocking(ask_same));
-                        }
-                    }
+                    IpcResponse::Pair(u) => view.step(&u),
                     IpcResponse::Ok { message } => {
-                        writeln!(out, "{message}")?;
+                        view.finish(true, &message).await;
                         return Ok(0);
                     }
                     IpcResponse::Error { message } => {
-                        eprintln!("jaunt: {message}");
+                        view.finish(false, &message).await;
                         return Ok(1);
                     }
                     _ => {}
                 }
             }
-            a = async {
-                match asking.as_mut() {
-                    Some(h) => h.await,
-                    None => std::future::pending().await,
+            i = view.input() => match i {
+                RitualInput::Answer(accept) => send(&mut wr, &IpcRequest::PairAnswer { accept }).await?,
+                RitualInput::Cancel => {
+                    view.finish(false, "cancelled").await;
+                    return Ok(130);
                 }
-            }, if asking.is_some() => {
-                asking = None;
-                let accept = a.unwrap_or(false);
-                send(&mut wr, &IpcRequest::PairAnswer { accept }).await?;
-            }
+            },
         }
     }
 }

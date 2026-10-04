@@ -220,20 +220,19 @@ pub enum Service {
     Tcp {
         port: u16,
     },
-    Copy {},
+    /// `push`: the client sends a tree to be written at `path` on the host; `pull`: the
+    /// host sends the tree at `path`. Body: see `services::copy`.
+    Copy {
+        op: CopyOp,
+        path: String,
+    },
 }
 
-impl Service {
-    pub fn name(&self) -> &'static str {
-        match self {
-            Service::Sync => "sync",
-            Service::Ping => "ping",
-            Service::Shell { .. } => "shell",
-            Service::Exec { .. } => "exec",
-            Service::Tcp { .. } => "tcp",
-            Service::Copy { .. } => "copy",
-        }
-    }
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CopyOp {
+    Push,
+    Pull,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -334,6 +333,10 @@ pub enum IpcRequest {
     /// Tombstone this machine and tell the others. -> `Told`s, then `Unlinked`. The client
     /// then stops the daemon and wipes the key and roster.
     Leave,
+    /// What `jaunt check` needs beyond `Status`. -> `Check`
+    Check,
+    /// Turn host mode (§9) on or off; persisted in config.toml. -> `Ok`
+    SetHost { on: bool },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -351,6 +354,49 @@ pub enum IpcResponse {
     Told { peer: PeerRef, ok: bool, detail: String },
     /// Result of `Unlink` / `Leave`.
     Unlinked(UnlinkReport),
+    Check(CheckReport),
+}
+
+/// The daemon's view of the network, for `jaunt check`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct CheckReport {
+    /// Latest iroh net report; `None` until the first one finished.
+    pub net: Option<NetSummary>,
+    /// Every remote address this daemon has sent to or holds a socket with.
+    pub contacts: Vec<Contact>,
+    /// IP addresses the relay host names resolve to now.
+    pub relay_ips: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct NetSummary {
+    /// QUIC address discovery answered over IPv4 / IPv6.
+    pub udp_v4: bool,
+    pub udp_v6: bool,
+    pub global_v4: Option<String>,
+    pub global_v6: Option<String>,
+    /// The public address differs per destination (hard NAT: direct paths are unlikely).
+    pub mapping_varies: Option<bool>,
+    pub probes: Vec<RelayProbe>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RelayProbe {
+    pub url: String,
+    /// "https", "qad_ipv4" or "qad_ipv6".
+    pub probe: String,
+    pub ms: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Contact {
+    /// `ip:port`.
+    pub addr: String,
+    /// "udp" (a QUIC path to a peer) or "tcp" / "udp-socket" (an open socket right now).
+    pub via: String,
+    /// The peer this path belongs to, if any.
+    pub peer: Option<String>,
+    pub last_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -477,6 +523,53 @@ pub struct StatusSnapshot {
     pub bound: Vec<String>,
     pub peers: Vec<PeerStatus>,
     pub revoked: Vec<RevokedStatus>,
+    /// This machine's host-mode guard (§9).
+    #[serde(default)]
+    pub host: Option<HostReport>,
+}
+
+/// Host mode in one word, for `ls`, the mesh view and peers' `PingInfo::host`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HostState {
+    /// Host mode is off: the machine sleeps as configured.
+    Off,
+    /// The lid lock is held: closing the lid keeps the machine awake and reachable.
+    Awake,
+    /// On battery: not holding; closing the lid sleeps.
+    OnBattery,
+    /// Tripped by heat; released until the lid is opened again.
+    TooHot,
+    /// On, but not holding for another reason (see `reason`): closing the lid sleeps.
+    WillSleep,
+}
+
+impl HostState {
+    pub fn label(self) -> &'static str {
+        match self {
+            HostState::Off => "off",
+            HostState::Awake => "awake",
+            HostState::OnBattery => "on battery",
+            HostState::TooHot => "too hot",
+            HostState::WillSleep => "will sleep on lid close",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HostReport {
+    pub state: HostState,
+    /// Plain words: why the guard is in this state.
+    pub reason: String,
+    /// Plain words: what closing the lid does right now.
+    pub on_lid_close: String,
+    pub lock_held: bool,
+    /// "open", "closed" or "unknown".
+    pub lid: String,
+    /// "mains", "battery", "mains, battery draining" or "unknown".
+    pub power: String,
+    /// Hottest sensor, e.g. "k10temp Tctl 54 °C".
+    pub hottest: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

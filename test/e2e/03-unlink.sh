@@ -74,7 +74,7 @@ check "c is refused by b" c_refused_by b
 h_jaunt c run b -- true > "$OUT-refused.out" 2>&1; sed 's/^/    c| /' "$OUT-refused.out"
 
 note "c tries to come back by syncing (daemon restart, it dials a and b for 40 s)"
-h_root c pkill -u jaunt -x jaunt; sleep 1; h_daemon_start c
+h_daemon_restart c
 sleep 40
 check "a still has c revoked" revoked_on a
 check "b still has c revoked" revoked_on b
@@ -82,7 +82,7 @@ check "c still cannot connect to a" not_connected c a
 check "c still cannot connect to b" not_connected c b
 
 note "c tries to come back by pairing with its old key (roster deleted, key kept)"
-h_root c pkill -u jaunt -x jaunt; sleep 1
+h_daemon_stop c
 h_exec c rm -f /home/jaunt/jh/data/roster.json; h_daemon_start c
 wait_until 15 docker exec jaunt-c test -S /home/jaunt/jh/run/sock
 rejoin_fails() { ! h_link a c; }

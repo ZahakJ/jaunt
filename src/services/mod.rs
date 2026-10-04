@@ -1,4 +1,10 @@
-//! Exec (run one command without a pty). Tcp and Copy are refused for now by the daemon.
+//! The non-shell services: exec (`jaunt run`, here), tcp (`jaunt fwd`, `jaunt pipe`) and
+//! copy (`jaunt cp`). Every process started for a peer is registered in `Daemon::children`
+//! so that revoking the peer ends it.
+
+pub mod copy;
+pub mod tcp;
+mod tree;
 
 use std::process::Stdio;
 use std::sync::Arc;

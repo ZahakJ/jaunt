@@ -44,6 +44,22 @@ const STRIP_ENV: &[&str] = &[
     "LISTEN_FDNAMES", "INVOCATION_ID", "JOURNAL_STREAM", "JAUNT_LOG",
 ];
 
+/// `tmux new-session -e` exists from tmux 3.0 on. Asked once per daemon.
+fn tmux_has_new_session_env(tmux: &std::path::Path) -> bool {
+    static ANSWER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ANSWER.get_or_init(|| {
+        let out = std::process::Command::new(tmux).arg("-V").output().ok();
+        let text = out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+        tmux_version_at_least_3(&text)
+    })
+}
+
+/// Parse `tmux 3.7c`, `tmux next-3.5`, `tmux 2.6`.
+fn tmux_version_at_least_3(v: &str) -> bool {
+    let num = v.split_whitespace().nth(1).unwrap_or("").trim_start_matches("next-");
+    num.split('.').next().and_then(|m| m.parse::<u32>().ok()).is_some_and(|m| m >= 3)
+}
+
 pub fn which(name: &str) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let path = std::env::var_os("PATH")?;
@@ -99,6 +115,12 @@ pub async fn serve(d: &Arc<Daemon>, from: MachineId, req: ShellRequest, mut send
         Some(t) => {
             let mut c = tmux_command(t, cfg.tmux_socket().as_deref());
             c.args(["new-session", "-A", "-s", &req.session]);
+            // A running tmux server gives new sessions its own (stale) environment; `-e`
+            // (tmux >= 3.0) sets these two for the new session. Names are roster-validated.
+            if tmux_has_new_session_env(t) {
+                c.arg("-e").arg(format!("JAUNT_FROM={}", d.name_of(&from)));
+                c.arg("-e").arg(format!("JAUNT_MACHINE={me}"));
+            }
             c
         }
         None => {
@@ -229,6 +251,33 @@ fn shell_service(session: &str) -> Service {
 }
 
 /// `jaunt <machine>[:session]`. Returns the process exit code.
+/// DESIGN §8: a hop from inside tmux without jaunt.tmux gets a one-time hint about how
+/// keys reach the remote tmux. Shown once per machine (a marker in the state directory).
+fn tmux_hint_once(paths: &Paths, peer: &str) {
+    if std::env::var_os("TMUX").is_none() {
+        return;
+    }
+    let marker = paths.state_dir.join("tmux-hint-shown");
+    if marker.exists() {
+        return;
+    }
+    let snippet = std::process::Command::new("tmux")
+        .args(["show-options", "-gqv", "@jaunt_tmux"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map(|o| o.stdout.starts_with(b"1"))
+        .unwrap_or(false);
+    if !snippet {
+        eprintln!(
+            "inside tmux, the prefix goes to this tmux: press it twice to send it to {peer}'s, \
+             or run 'jaunt tmux-setup' for an F12 switch (shown once)"
+        );
+    }
+    let _ = crate::paths::private_dir(&paths.state_dir).and_then(|_| {
+        std::fs::write(&marker, b"").map_err(anyhow::Error::from)
+    });
+}
+
 pub async fn hop(paths: &Paths, target: &str, session: &str) -> Result<i32> {
     if !term::stdin_is_tty() {
         anyhow::bail!("a hop needs a terminal; to run a command use: jaunt run {target} -- <command>");
@@ -244,19 +293,13 @@ pub async fn hop(paths: &Paths, target: &str, session: &str) -> Result<i32> {
         })
         .unwrap_or_else(|| "here".into());
     eprintln!("{}", ui::hop_banner_in(&me, &peer.name, path, rtt));
+    tmux_hint_once(paths, &peer.name);
 
     let raw = RawMode::enable().context("cannot put the terminal in raw mode")?;
     let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(32);
-    tokio::spawn(async move {
-        use tokio::io::AsyncReadExt;
-        let mut stdin = tokio::io::stdin();
-        let mut buf = vec![0u8; 8192];
-        while let Ok(n) = stdin.read(&mut buf).await {
-            if n == 0 || stdin_tx.send(buf[..n].to_vec()).await.is_err() {
-                break;
-            }
-        }
-    });
+    // Stops when the hop ends, so no blocked read is left behind to steal the next key
+    // (the mesh view reads stdin again after a hop).
+    let _pump = term::StdinPump::start(stdin_tx);
     use tokio::signal::unix::{SignalKind, signal};
     let mut sig = Signals {
         winch: signal(SignalKind::window_change())?,
@@ -397,6 +440,16 @@ async fn session_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tmux_versions() {
+        assert!(tmux_version_at_least_3("tmux 3.7c\n"));
+        assert!(tmux_version_at_least_3("tmux 3.0a"));
+        assert!(tmux_version_at_least_3("tmux next-3.5"));
+        assert!(!tmux_version_at_least_3("tmux 2.6"));
+        assert!(!tmux_version_at_least_3("garbage"));
+        assert!(!tmux_version_at_least_3(""));
+    }
 
     #[test]
     fn env_filter() {

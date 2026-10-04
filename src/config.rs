@@ -36,6 +36,31 @@ pub struct Config {
     /// Fixed UDP port for the endpoint (default: any).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    /// Host mode (`jaunt host on|off`), see `src/awake/`.
+    #[serde(skip_serializing_if = "HostConfig::is_default")]
+    pub host: HostConfig,
+}
+
+/// `[host]` in config.toml. Thresholds are optional overrides of the guard's defaults.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HostConfig {
+    pub enabled: bool,
+    /// Sustained temperature that trips the guard (°C, default 90).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hot_c: Option<f64>,
+    /// How long it must stay that hot (seconds, default 120).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hot_secs: Option<u64>,
+    /// Trip at once within this many °C of a sensor's critical point (default 5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crit_margin_c: Option<f64>,
+}
+
+impl HostConfig {
+    fn is_default(&self) -> bool {
+        *self == HostConfig::default()
+    }
 }
 
 impl Config {

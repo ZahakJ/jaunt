@@ -68,8 +68,12 @@ pub struct Daemon {
     weak: std::sync::Weak<Daemon>,
     /// Processes running here on behalf of peers (ended when a peer is revoked).
     pub children: Arc<Children>,
+    /// Remote addresses of QUIC paths, for the contact audit in `jaunt check`.
+    pub contacts: crate::check::Contacts,
     /// Held for the whole of a link or join: one pairing at a time.
     pub pairing: tokio::sync::Mutex<()>,
+    /// Host-mode guard (§9).
+    pub host: crate::awake::Handle,
 }
 
 fn effective_relays(cfg: &Config, roster: &Roster) -> Vec<String> {
@@ -131,6 +135,7 @@ pub async fn run(paths: Paths) -> Result<()> {
         members: members.clone(),
     })
     .await?;
+    let host = crate::awake::start(&paths, &cfg.host);
     let (roster_tx, _) = watch::channel(0u64);
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let d = Arc::new_cyclic(|weak| Daemon {
@@ -150,7 +155,9 @@ pub async fn run(paths: Paths) -> Result<()> {
         started_at: now_ms(),
         sessions_cache: Mutex::new(None),
         children: Arc::new(Children::default()),
+        contacts: Default::default(),
         pairing: tokio::sync::Mutex::new(()),
+        host,
     });
     d.events.emit(Some(d.me_ref()), EventKind::DaemonStarted { version: proto::VERSION.into() });
     tracing::info!("jaunt daemon {} id {} listening on {:?}", proto::VERSION, d.me, d.ep.bound_sockets());
@@ -160,9 +167,16 @@ pub async fn run(paths: Paths) -> Result<()> {
     tokio::spawn(ipc::serve(d.clone(), listener));
     systemd::notify("READY=1");
     if let Some(every) = systemd::watchdog_interval() {
+        // Pet the watchdog only while the host-mode guard is ticking: if it hangs while
+        // holding the lid lock, systemd kills the daemon and the lock goes with it.
+        let d2 = d.clone();
         tokio::spawn(async move {
             loop {
-                systemd::notify("WATCHDOG=1");
+                if d2.host.alive() {
+                    systemd::notify("WATCHDOG=1");
+                } else {
+                    tracing::error!("the host-mode guard is stuck; letting the watchdog restart the daemon");
+                }
                 tokio::time::sleep(every).await;
             }
         });
@@ -361,6 +375,7 @@ impl Daemon {
                 _ = tick.tick() => {
                     self.refresh_path(&conn, &id, seq);
                     self.sample_rtt(&conn, &id, seq);
+                    self.contacts.note_conn(&conn, &self.name_of(&id));
                 }
                 _ = ping.tick() => {
                     let d = self.clone();
@@ -572,7 +587,7 @@ impl Daemon {
                     name: self.my_name(),
                     version: proto::VERSION.into(),
                     sessions: self.session_count().await,
-                    host: None,
+                    host: Some(self.host.report().state.label().to_string()),
                     time_ms: now_ms(),
                 };
                 proto::write_json(&mut send, FrameType::Json, &info).await?;
@@ -588,9 +603,14 @@ impl Daemon {
                 self.events.emit(Some(self.peer_ref(&id)), EventKind::Served { service: "exec".into() });
                 services::serve_exec(&self, id, argv, send, recv).await
             }
-            other => {
-                let why = format!("{} is not implemented yet on {} (jaunt {})", other.name(), self.my_name(), proto::VERSION);
-                refuse(&mut send, &why).await
+            Service::Tcp { port } => {
+                self.events.emit(Some(self.peer_ref(&id)), EventKind::Served { service: format!("tcp {port}") });
+                services::tcp::serve(&self, id, port, send, recv).await
+            }
+            Service::Copy { op, path } => {
+                let what = match op { proto::CopyOp::Push => "copy in", proto::CopyOp::Pull => "copy out" };
+                self.events.emit(Some(self.peer_ref(&id)), EventKind::Served { service: what.into() });
+                services::copy::serve(&self, id, op, path, send, recv).await
             }
         }
     }
@@ -887,6 +907,7 @@ impl Daemon {
             bound: self.ep.bound_sockets().iter().map(|s| s.to_string()).collect(),
             peers,
             revoked,
+            host: Some(self.host.report()),
         }
     }
 
@@ -961,6 +982,15 @@ impl Daemon {
             c.save(&self.paths)?;
         }
         Ok(format!("this machine is now called {name}"))
+    }
+
+    pub fn set_host(&self, on: bool) -> Result<String> {
+        if let Ok(mut c) = self.cfg.lock() {
+            c.host.enabled = on;
+            c.save(&self.paths)?;
+        }
+        self.host.set_enabled(on);
+        Ok(if on { "host mode on".into() } else { "host mode off: the lid lock is released".into() })
     }
 
     pub fn set_relays(&self, relays: Vec<String>) -> Result<String> {

@@ -103,6 +103,8 @@ async fn handle(d: Arc<Daemon>, mut s: UnixStream) -> Result<()> {
         }
         IpcRequest::Unlink { target, cascade } => crate::trust::serve_ipc(d, s, crate::trust::Request::Unlink { target, cascade }).await,
         IpcRequest::Leave => crate::trust::serve_ipc(d, s, crate::trust::Request::Leave).await,
+        IpcRequest::SetHost { on } => reply(&mut s, &result(d.set_host(on))).await,
+        IpcRequest::Check => reply(&mut s, &IpcResponse::Check(crate::check::report(&d).await)).await,
         IpcRequest::Shutdown => {
             reply(&mut s, &IpcResponse::Ok { message: "daemon stopping".into() }).await?;
             d.shutdown();
