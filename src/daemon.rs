@@ -1,8 +1,8 @@
 //! The daemon: owns the key and the one endpoint, keeps a warm connection to every roster
 //! member, serves incoming streams, syncs the roster, and records paths, RTT and events.
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -31,10 +31,31 @@ const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 const PING_EVERY: Duration = Duration::from_secs(10);
 const RTT_HISTORY: usize = 60;
+/// A peer that refuses us as "not a member" right after linking usually just has not
+/// written its roster yet: try again this soon, this many times, before the normal cadence.
+const REFUSED_RETRY: Duration = Duration::from_secs(1);
+const REFUSED_FAST_TRIES: u32 = 15;
+/// H1: after an absence, sync with every other member (bounded) before serving anyone.
+const SETTLE_LIMIT: Duration = Duration::from_secs(5);
+/// No authenticated contact with any member for this long counts as an absence.
+const ABSENT_AFTER_MS: u64 = 60_000;
+/// The daemon's 1 s monitor not running for this long means it was frozen or suspended.
+const TICK_GAP_MS: u64 = 5_000;
+/// How long a gated request waits for the settling round (it is bounded by SETTLE_LIMIT).
+const SETTLE_WAIT: Duration = Duration::from_secs(8);
 
 #[derive(Default)]
 struct Peer {
     conn: Option<Connection>,
+    /// Every connection adopted for this peer that may still be open (the current one
+    /// included), so that revoking it closes all of them (R2).
+    conns: Vec<Connection>,
+    /// Consecutive "not a member" refusals from the peer on connections we dialled.
+    refusals: u32,
+    /// The connection whose handshake was reported (an outgoing one after its first sync).
+    announced: Option<usize>,
+    /// Datagrams received on the current connection, and when that count last grew (H3).
+    rx_seen: (u64, u64),
     conn_seq: u64,
     /// The current connection was dialled by the peer.
     incoming: bool,
@@ -72,8 +93,51 @@ pub struct Daemon {
     pub contacts: crate::check::Contacts,
     /// Held for the whole of a link or join: one pairing at a time.
     pub pairing: tokio::sync::Mutex<()>,
+    /// Codes this machine already tried as a joiner (each is tried once).
+    pub tried_codes: crate::pair::TriedCodes,
     /// Host-mode guard (§9).
     pub host: crate::awake::Handle,
+    /// H1: the settling round after an absence.
+    settle: Settle,
+    /// H2: last working direct addresses of each peer, persisted as dial hints.
+    addrs: Mutex<crate::addrs::AddrBook>,
+    /// H9: which machine created which tmux session here (persisted).
+    tmux_owners: Mutex<BTreeMap<String, MachineId>>,
+}
+
+/// H1. A machine that comes back from an absence (daemon start, a freeze or suspend, or no
+/// contact with any member for a minute) may hold a roster that misses a revocation. Until
+/// it has tried to sync with every other member (all attempts finished or `SETTLE_LIMIT`
+/// passed) it serves Sync and Ping only, so a revoked machine cannot win the race against
+/// the tombstone while any informed member is reachable.
+struct Settle {
+    open: watch::Sender<bool>,
+    running: AtomicBool,
+    /// Wall-clock ms of the monitor's last tick, of the last contact, of the last settling round.
+    last_tick: AtomicU64,
+    last_contact: AtomicU64,
+    last_settled: AtomicU64,
+}
+
+impl Settle {
+    fn new(now: u64) -> Settle {
+        Settle {
+            open: watch::channel(false).0,
+            running: AtomicBool::new(false),
+            last_tick: AtomicU64::new(now),
+            last_contact: AtomicU64::new(now),
+            last_settled: AtomicU64::new(0),
+        }
+    }
+
+    /// Back from an absence at `now`: frozen or suspended (the monitor did not tick), or
+    /// no contact with any member for a minute and no settling round since.
+    fn absent(&self, now: u64) -> bool {
+        let gap = now.saturating_sub(self.last_tick.load(Ordering::Relaxed));
+        let quiet = now.saturating_sub(self.last_contact.load(Ordering::Relaxed));
+        let settled = now.saturating_sub(self.last_settled.load(Ordering::Relaxed));
+        gap > TICK_GAP_MS || (quiet > ABSENT_AFTER_MS && settled > ABSENT_AFTER_MS)
+    }
 }
 
 fn effective_relays(cfg: &Config, roster: &Roster) -> Vec<String> {
@@ -125,16 +189,30 @@ pub async fn run(paths: Paths) -> Result<()> {
     }
     let members = Arc::new(Members::default());
     members.set(member_set(&roster, &me));
-    let ep = net::build_endpoint(net::EndpointOptions {
+    let addrs = crate::addrs::AddrBook::load(&paths);
+    let opts = |port: Option<u16>, secret: iroh::SecretKey| net::EndpointOptions {
         secret,
         relays: &relays,
         relay_ca: cfg.relay_ca.as_deref(),
-        // Off by default under JAUNT_HOME (tests) so a test never asks a real gateway for a mapping.
-        portmapper: cfg.portmapper.unwrap_or(paths.jaunt_home.is_none()),
-        port: cfg.port,
+        // H4: off unless the owner asks for it (it changes the owner's router).
+        portmapper: cfg.portmap.unwrap_or(false),
+        port,
         members: members.clone(),
-    })
-    .await?;
+    };
+    // H2: without a fixed port, bind the one used last time when it is free, so the
+    // public address peers remember (and the NAT mapping behind it) stays the same.
+    let ep = match (cfg.port, addrs.own_port()) {
+        (Some(p), _) => net::build_endpoint(opts(Some(p), secret)).await?,
+        (None, Some(last)) => match net::build_endpoint(opts(Some(last), secret.clone())).await {
+            Ok(ep) => ep,
+            Err(e) => {
+                tracing::info!("port {last} (used last time) is not free ({e:#}); taking any");
+                net::build_endpoint(opts(None, secret)).await?
+            }
+        },
+        (None, None) => net::build_endpoint(opts(None, secret)).await?,
+    };
+    let tmux_owners = crate::addrs::load_tmux_owners(&paths);
     let host = crate::awake::start(&paths, &cfg.host);
     let (roster_tx, _) = watch::channel(0u64);
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
@@ -157,15 +235,33 @@ pub async fn run(paths: Paths) -> Result<()> {
         children: Arc::new(Children::default()),
         contacts: Default::default(),
         pairing: tokio::sync::Mutex::new(()),
+        tried_codes: Default::default(),
         host,
+        settle: Settle::new(now_ms()),
+        addrs: Mutex::new(addrs),
+        tmux_owners: Mutex::new(tmux_owners),
     });
+    d.note_own_port();
     d.events.emit(Some(d.me_ref()), EventKind::DaemonStarted { version: proto::VERSION.into() });
     tracing::info!("jaunt daemon {} id {} listening on {:?}", proto::VERSION, d.me, d.ep.bound_sockets());
 
     tokio::spawn(d.clone().accept_loop());
     tokio::spawn(d.clone().supervisor());
+    // A daemon start is a return from absence: settle before serving shells and commands.
+    d.begin_settle("daemon start");
+    tokio::spawn(d.clone().monitor());
     tokio::spawn(ipc::serve(d.clone(), listener));
     systemd::notify("READY=1");
+    {
+        // L3: with or without systemd, a stuck host-mode guard never keeps the lid lock.
+        let d2 = d.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                d2.host.failsafe();
+            }
+        });
+    }
     if let Some(every) = systemd::watchdog_interval() {
         // Pet the watchdog only while the host-mode guard is ticking: if it hangs while
         // holding the lid lock, systemd kills the daemon and the lock goes with it.
@@ -288,28 +384,37 @@ impl Daemon {
                         (conn.clone(), Some(old))
                     }
                     // A peer dials only when it has no live connection to us, so a new
-                    // connection outside a dial race means the old one is dead on its side
-                    // (it restarted, or its end timed out): drop ours now rather than
-                    // waiting for the idle timeout.
-                    Some(old) if !fresh => {
+                    // connection outside a dial race (an old one of any age in the same
+                    // direction, or an old one older than the race window) means the old
+                    // one is dead on its side (it restarted, or its end timed out): close
+                    // ours now rather than leave it open and unaccounted for (R2).
+                    Some(old) => {
                         old.close(CLOSE_NORMAL.into(), b"replaced by a new connection");
                         Self::set_current(p, &conn, seq, incoming, path.clone());
                         (conn.clone(), None)
                     }
-                    _ => {
+                    None => {
                         Self::set_current(p, &conn, seq, incoming, path.clone());
                         (conn.clone(), None)
                     }
                 }
             })
             .unwrap_or((conn.clone(), None));
+        // Every adopted connection is remembered until it closes, so a revocation reaches all.
+        self.with_peer(&id, |p| {
+            p.conns.retain(|c| c.close_reason().is_none());
+            p.conns.push(conn.clone());
+        });
         if let Some(dup) = duplicate {
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(3)).await;
                 dup.close(CLOSE_NORMAL.into(), b"duplicate connection");
             });
         }
-        if current.stable_id() == conn.stable_id() {
+        // An outgoing connection reports its handshake once its first sync went through
+        // (H8): the other side may still refuse us while it learns of this machine.
+        if incoming && current.stable_id() == conn.stable_id() {
+            self.with_peer(&id, |p| p.announced = Some(conn.stable_id()));
             self.events.emit(Some(self.peer_ref(&id)), EventKind::Handshake { incoming, path: kind });
         }
         tokio::spawn(self.clone().serve_conn(conn.clone(), id));
@@ -330,27 +435,56 @@ impl Daemon {
         p.last_seen = Some(now_ms());
         p.path = path;
         p.last_error = None;
+        p.rx_seen = (0, now_ms());
     }
 
     async fn on_closed(self: Arc<Self>, conn: Connection, id: MachineId, seq: u64) {
-        let reason = describe_close(&conn.closed().await);
-        let was_current = self
+        let err = conn.closed().await;
+        let reason = describe_close(&err);
+        // The peer closed a connection we dialled, as not a member, before any sync: it
+        // does not know this machine yet (a link being formed) or it revoked us.
+        let refused = matches!(&err, ConnectionError::ApplicationClosed(c) if u64::from(c.error_code) == u64::from(CLOSE_NOT_MEMBER));
+        let (was_current, refusals) = self
             .with_peer(&id, |p| {
+                p.conns.retain(|c| c.stable_id() != conn.stable_id() && c.close_reason().is_none());
                 if p.conn_seq == seq {
                     p.conn = None;
                     p.path = None;
                     p.since = None;
-                    true
+                    if refused {
+                        p.refusals += 1;
+                    }
+                    (true, p.refusals)
                 } else {
-                    false
+                    (false, 0)
                 }
             })
-            .unwrap_or(false);
-        if was_current {
+            .unwrap_or((false, 0));
+        if !was_current {
+            return;
+        }
+        let delay = if refused {
+            // One quiet line per streak instead of a handshake and a "link down" each time.
+            let text = format!("{} refuses this machine as not a member there (it may not know of it yet)", self.name_of(&id));
+            let first = self
+                .with_peer(&id, |p| {
+                    let new = p.last_error.as_deref() != Some(text.as_str());
+                    p.last_error = Some(text.clone());
+                    new
+                })
+                .unwrap_or(false);
+            if first {
+                self.events.emit(Some(self.peer_ref(&id)), EventKind::DialFailed { error: text });
+            }
+            (refusals <= REFUSED_FAST_TRIES).then_some(REFUSED_RETRY)
+        } else {
             self.events.emit(Some(self.peer_ref(&id)), EventKind::Disconnected { reason });
+            Some(RECONNECT_AFTER_LOSS)
+        };
+        if let Some(delay) = delay {
             let kick = self.with_peer(&id, |p| p.kick.clone());
             tokio::spawn(async move {
-                tokio::time::sleep(RECONNECT_AFTER_LOSS).await;
+                tokio::time::sleep(delay).await;
                 if let Some(k) = kick {
                     k.notify_one();
                 }
@@ -373,6 +507,12 @@ impl Daemon {
                     self.refresh_path(&conn, &id, seq);
                 }
                 _ = tick.tick() => {
+                    let rx = conn.stats().udp_rx.datagrams;
+                    self.with_peer(&id, |p| {
+                        if p.conn_seq == seq && p.rx_seen.0 != rx {
+                            p.rx_seen = (rx, now_ms());
+                        }
+                    });
                     self.refresh_path(&conn, &id, seq);
                     self.sample_rtt(&conn, &id, seq);
                     self.contacts.note_conn(&conn, &self.name_of(&id));
@@ -388,6 +528,16 @@ impl Daemon {
 
     fn refresh_path(&self, conn: &Connection, id: &MachineId, seq: u64) {
         let now = net::selected_path(conn);
+        // H2: a working direct path's address is worth remembering for the next dial.
+        if let Some(p) = &now
+            && p.kind == PathKind::Direct
+            && let Ok(sa) = p.remote.parse::<std::net::SocketAddr>()
+        {
+            let changed = self.addrs.lock().map(|mut b| b.note(*id, sa)).unwrap_or(false);
+            if changed {
+                self.save_addrs();
+            }
+        }
         let changed = self
             .with_peer(id, |p| {
                 if p.conn_seq != seq {
@@ -445,6 +595,14 @@ impl Daemon {
         .await;
         match res {
             Ok(Ok(info)) => {
+                self.note_contact();
+                // Shown on this machine's terminal: no control characters, short (R5).
+                let info = PingInfo {
+                    name: crate::term::safe_text(&info.name, 64, false),
+                    version: crate::term::safe_text(&info.version, 32, false),
+                    host: info.host.map(|h| crate::term::safe_text(&h, 64, false)),
+                    ..info
+                };
                 self.with_peer(&id, |p| p.info = Some(info));
             }
             Ok(Err(e)) => tracing::debug!("ping {} failed: {e:#}", id.short()),
@@ -463,10 +621,12 @@ impl Daemon {
             return Ok(c);
         }
         let relays = self.relays();
-        if relays.is_empty() {
+        let has_hints = self.addrs.lock().map(|b| !b.hints(&id).is_empty()).unwrap_or(false);
+        if relays.is_empty() && !has_hints {
             bail!("no relay is configured, so {} cannot be found (set one with: jaunt relay set URL)", self.name_of(&id));
         }
-        let addr = net::dial_addr(id, &relays)?;
+        let hints = self.addrs.lock().map(|b| b.hints(&id)).unwrap_or_default();
+        let addr = net::dial_addr(id, &relays, &hints)?;
         let res = {
             let _dialing = DialFlag::set(self, id);
             timeout(DIAL_TIMEOUT, self.ep.connect(addr, proto::ALPN)).await
@@ -516,11 +676,13 @@ impl Daemon {
                 // own sync revoked it (`jaunt leave`), which still needs to read its answer.
                 if let Ok(mut g) = self.peers.lock()
                     && let Some(p) = g.remove(&id)
-                    && let Some(c) = p.conn
                 {
+                    let conns: Vec<Connection> = p.conn.into_iter().chain(p.conns).collect();
                     tokio::spawn(async move {
                         tokio::time::sleep(Duration::from_secs(3)).await;
-                        c.close(CLOSE_NOT_MEMBER.into(), b"removed from the mesh");
+                        for c in conns {
+                            c.close(CLOSE_NOT_MEMBER.into(), b"removed from the mesh");
+                        }
                     });
                 }
                 return;
@@ -579,9 +741,49 @@ impl Daemon {
         if !self.is_member(&id) {
             return self.refuse_logged(&id, &mut send, "not a member of this mesh").await;
         }
-        match hello.service {
+        if !matches!(hello.service, Service::Sync | Service::Ping) {
+            // H1: after an absence, nothing but Sync and Ping until this machine has
+            // tried to sync with every other member; then ask again whether `id` is one.
+            if !self.wait_settled().await {
+                tracing::info!("served {} although settling did not finish in time", id.short());
+            }
+            if !self.is_member(&id) {
+                return self.refuse_logged(&id, &mut send, "not a member of this mesh").await;
+            }
+        }
+        let served = self.clone().serve_service(conn, id, hello.service, send, recv);
+        // R3: whatever a peer runs here ends when it is revoked, streams included.
+        tokio::select! {
+            r = served => r,
+            _ = self.until_revoked(id) => {
+                tracing::info!("ended a stream of {}: it was unlinked", id.short());
+                Ok(())
+            }
+        }
+    }
+
+    /// Resolves once `id` is no longer a member.
+    async fn until_revoked(&self, id: MachineId) {
+        let mut rx = self.roster_tx.subscribe();
+        while self.is_member(&id) {
+            if rx.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+
+    async fn serve_service(self: Arc<Self>, conn: Connection, id: MachineId, service: Service, mut send: SendStream, recv: RecvStream) -> Result<()> {
+        match service {
             Service::Sync => self.serve_sync(conn, id, send, recv).await,
+            Service::KillSessions { of } => {
+                proto::write_json(&mut send, FrameType::Reply, &Reply::Ok).await?;
+                let n = self.kill_tmux_sessions_of(&of).await;
+                proto::write_json(&mut send, FrameType::Json, &n).await?;
+                send.finish()?;
+                Ok(())
+            }
             Service::Ping => {
+                self.note_contact();
                 proto::write_json(&mut send, FrameType::Reply, &Reply::Ok).await?;
                 let info = PingInfo {
                     name: self.my_name(),
@@ -596,6 +798,7 @@ impl Daemon {
             }
             Service::Shell { session, term, cols, rows, env } => {
                 self.events.emit(Some(self.peer_ref(&id)), EventKind::Served { service: "shell".into() });
+                self.note_tmux_creator(&session, id).await;
                 let req = shell::ShellRequest { session, term, cols, rows, env };
                 shell::serve(&self, id, req, send, recv).await
             }
@@ -639,12 +842,19 @@ impl Daemon {
     async fn serve_sync(&self, conn: Connection, id: MachineId, mut send: SendStream, mut recv: RecvStream) -> Result<()> {
         let payload = timeout(HEADER_TIMEOUT, proto::expect_frame(&mut recv, FrameType::Json)).await??;
         let theirs: Roster = proto::parse_json(&payload, MAX_FRAME)?;
-        let changed = self.apply_remote_roster(&theirs, &id);
+        let changed = match self.apply_remote_roster(&theirs, &id) {
+            Ok(c) => c,
+            Err(e) => {
+                // Said in words, so `unlink` reports a rejected merge as such (R1).
+                let why = format!("{} could not take your roster: {e:#}", self.my_name());
+                return self.refuse_logged(&id, &mut send, &why).await;
+            }
+        };
+        self.note_contact();
         proto::write_json(&mut send, FrameType::Reply, &Reply::Ok).await?;
         let ours = self.roster_snapshot();
         proto::write_json(&mut send, FrameType::Json, &ours).await?;
         send.finish()?;
-        let changed = changed?;
         self.events.emit(Some(self.peer_ref(&id)), EventKind::Sync { changed, outgoing: false });
         if !self.is_member(&id) {
             // The sender's roster revoked the sender itself (`jaunt leave`): it was spared
@@ -681,6 +891,7 @@ impl Daemon {
                 None => self.roster_snapshot(),
             };
             let theirs = Self::exchange_roster(&conn, &ours).await?;
+            self.note_contact();
             if push.is_none() {
                 let changed = self.apply_remote_roster(&theirs, &id)?;
                 self.events.emit(Some(self.peer_ref(&id)), EventKind::Sync { changed, outgoing: true });
@@ -697,11 +908,31 @@ impl Daemon {
     async fn sync_with(self: Arc<Self>, conn: Connection, id: MachineId) {
         let res = timeout(Duration::from_secs(15), async {
             let theirs = Self::exchange_roster(&conn, &self.roster_snapshot()).await?;
+            self.note_contact();
             self.apply_remote_roster(&theirs, &id)
         })
         .await;
         match res {
-            Ok(Ok(changed)) => self.events.emit(Some(self.peer_ref(&id)), EventKind::Sync { changed, outgoing: true }),
+            Ok(Ok(changed)) => {
+                // The first sync on a connection we dialled is when the link is really up.
+                let first = self
+                    .with_peer(&id, |p| {
+                        p.refusals = 0;
+                        p.last_error = None;
+                        let current = p.conn.as_ref().is_some_and(|c| c.stable_id() == conn.stable_id());
+                        let first = current && p.announced != Some(conn.stable_id());
+                        if first {
+                            p.announced = Some(conn.stable_id());
+                        }
+                        first
+                    })
+                    .unwrap_or(false);
+                if first {
+                    let kind = net::selected_path(&conn).map(|p| p.kind).unwrap_or(PathKind::Unknown);
+                    self.events.emit(Some(self.peer_ref(&id)), EventKind::Handshake { incoming: false, path: kind });
+                }
+                self.events.emit(Some(self.peer_ref(&id)), EventKind::Sync { changed, outgoing: true })
+            }
             Ok(Err(e)) => tracing::info!("sync with {} failed: {e:#}", id.short()),
             Err(_) => tracing::info!("sync with {} timed out", id.short()),
         }
@@ -713,20 +944,26 @@ impl Daemon {
 
     fn apply_remote_roster(&self, theirs: &Roster, from: &MachineId) -> Result<bool> {
         let mut theirs = theirs.clone();
-        for what in theirs.sanitize_remote() {
+        // Item by item: a bad entry or a full roster never costs the tombstones (R1).
+        for what in theirs.sanitize_remote().into_iter().chain(theirs.drop_malformed()) {
             tracing::warn!("ignored {what} in the roster from {}", from.short());
         }
-        theirs.validate().context("the peer sent an invalid roster")?;
         let (changed, before) = {
             let mut r = self.roster.lock().map_err(|_| anyhow!("roster lock poisoned"))?;
             let before = r.clone();
             let mut merged = r.clone();
-            if !merged.merge(&theirs) {
+            let (changed, skipped) = merged.merge_bounded(&theirs);
+            if skipped > 0 {
+                tracing::warn!("the roster from {} would pass the limits; {skipped} new item(s) not taken", from.short());
+            }
+            if !changed {
                 (false, before)
             } else {
                 merged.validate().context("merging would exceed the roster limits")?;
                 merged.save(&self.paths)?;
                 *r = merged;
+                // Membership changes under the roster lock, so no stream slips in between (R4).
+                self.members.set(member_set(&r, &self.me));
                 (true, before)
             }
         };
@@ -748,6 +985,7 @@ impl Daemon {
                 next.validate()?;
                 next.save(&self.paths)?;
                 *r = next;
+                self.members.set(member_set(&r, &self.me));
                 (true, before)
             }
         };
@@ -779,11 +1017,11 @@ impl Daemon {
         }
         if let Ok(g) = self.peers.lock() {
             for (id, p) in g.iter() {
-                if !members.contains(id)
-                    && Some(*id) != spare
-                    && let Some(c) = &p.conn
-                {
-                    c.close(CLOSE_NOT_MEMBER.into(), b"removed from the mesh");
+                if !members.contains(id) && Some(*id) != spare {
+                    // Every connection, not only the current one (R2).
+                    for c in p.conn.iter().chain(p.conns.iter()) {
+                        c.close(CLOSE_NOT_MEMBER.into(), b"removed from the mesh");
+                    }
                 }
             }
         }
@@ -850,6 +1088,183 @@ impl Daemon {
                 }
             }
         });
+    }
+
+    /// H3: milliseconds since anything arrived from `id` on its live connection.
+    pub fn quiet_ms(&self, id: &MachineId) -> Option<u64> {
+        let conn = self.live_conn(id)?;
+        let rx = conn.stats().udp_rx.datagrams;
+        let now = now_ms();
+        self.with_peer(id, |p| {
+            if p.rx_seen.0 != rx {
+                p.rx_seen = (rx, now);
+            }
+            now.saturating_sub(p.rx_seen.1)
+        })
+    }
+
+    // ---------------------------------------------------------------- settling (H1)
+
+    fn note_contact(&self) {
+        self.settle.last_contact.store(now_ms(), Ordering::Relaxed);
+    }
+
+    /// Close the gate and sync with every other member, at most `SETTLE_LIMIT`; then open it.
+    fn begin_settle(self: &Arc<Self>, why: &str) {
+        if self.settle.running.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.settle.open.send_replace(false);
+        let others: Vec<MachineId> =
+            self.roster.lock().map(|r| member_set(&r, &self.me).into_iter().collect()).unwrap_or_default();
+        if others.is_empty() || why.starts_with("no contact") {
+            tracing::debug!("settling ({why}): {} other member(s)", others.len());
+        } else {
+            tracing::info!("settling ({why}): syncing with {} other member(s) before serving anyone", others.len());
+        }
+        let d = self.clone();
+        tokio::spawn(async move {
+            let deadline = tokio::time::Instant::now() + SETTLE_LIMIT;
+            let mut set = tokio::task::JoinSet::new();
+            for id in others {
+                let d2 = d.clone();
+                set.spawn(async move {
+                    // A connection from before the absence can be dead without knowing it
+                    // yet; while time is left, try again (the retry dials afresh).
+                    for _ in 0..3 {
+                        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                        if left.is_zero() {
+                            break;
+                        }
+                        match d2.sync_once(id, None, left).await {
+                            Ok(_) => return true,
+                            Err(e) => {
+                                tracing::debug!("settling: sync with {} failed: {e:#}", id.short());
+                                tokio::time::sleep(Duration::from_millis(250)).await;
+                            }
+                        }
+                    }
+                    false
+                });
+            }
+            let (mut ok, mut missed) = (0, 0);
+            while let Ok(Some(r)) = tokio::time::timeout_at(deadline + Duration::from_millis(200), set.join_next()).await {
+                if matches!(r, Ok(true)) { ok += 1 } else { missed += 1 }
+            }
+            set.abort_all();
+            if ok + missed > 0 {
+                tracing::info!("settled: synced with {ok}, not reached {missed}");
+            }
+            d.settle.last_settled.store(now_ms(), Ordering::Relaxed);
+            d.settle.running.store(false, Ordering::SeqCst);
+            d.settle.open.send_replace(true);
+        });
+    }
+
+    /// For a request that needs settling: start a round if this is a return from absence,
+    /// and wait for it. False when it did not finish in time (it is bounded, so rare).
+    async fn wait_settled(self: &Arc<Self>) -> bool {
+        if self.settle.absent(now_ms()) {
+            self.begin_settle("back from an absence");
+        }
+        let mut rx = self.settle.open.subscribe();
+        matches!(timeout(SETTLE_WAIT, rx.wait_for(|open| *open)).await, Ok(Ok(_)))
+    }
+
+    /// Once a second: notice a freeze or suspend (the tick came late) or a long silence.
+    /// Once a minute: keep the detached daemon's log bounded.
+    async fn monitor(self: Arc<Self>) {
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut n: u64 = 0;
+        loop {
+            tick.tick().await;
+            n += 1;
+            if n.is_multiple_of(60) {
+                rotate_own_log(&self.paths.daemon_log());
+            }
+            let now = now_ms();
+            if self.settle.absent(now) {
+                let gap = now.saturating_sub(self.settle.last_tick.load(Ordering::Relaxed));
+                let why = if gap > TICK_GAP_MS { format!("this machine was frozen or asleep for {} s", gap / 1000) } else { "no contact with any member for a minute".into() };
+                self.begin_settle(&why);
+            }
+            self.settle.last_tick.store(now, Ordering::Relaxed);
+        }
+    }
+
+    // ---------------------------------------------------------------- address hints (H2)
+
+    fn save_addrs(&self) {
+        let members = self.members.snapshot();
+        if let Ok(mut b) = self.addrs.lock() {
+            b.retain_peers(|id| members.contains(id));
+            if let Err(e) = b.save(&self.paths) {
+                tracing::debug!("cannot save address hints: {e:#}");
+            }
+        }
+    }
+
+    fn note_own_port(&self) {
+        let port = self.ep.bound_sockets().iter().find(|s| s.is_ipv4()).map(|s| s.port());
+        if let Some(p) = port
+            && self.addrs.lock().map(|mut b| b.set_own_port(p)).unwrap_or(false)
+        {
+            self.save_addrs();
+        }
+    }
+
+    // ---------------------------------------------------------------- tmux sessions (H9)
+
+    /// Remember `from` as the creator of `session` if it does not exist yet.
+    async fn note_tmux_creator(&self, session: &str, from: MachineId) {
+        let Some(tmux) = shell::which("tmux") else { return };
+        if shell::tmux_has_session(&tmux, self.config().tmux_socket().as_deref(), session).await {
+            return;
+        }
+        let snapshot = match self.tmux_owners.lock() {
+            Ok(mut g) => {
+                g.insert(session.to_string(), from);
+                g.clone()
+            }
+            Err(_) => return,
+        };
+        if let Err(e) = crate::addrs::save_tmux_owners(&self.paths, &snapshot) {
+            tracing::debug!("cannot save tmux session owners: {e:#}");
+        }
+    }
+
+    /// Kill the tmux sessions that revoked machines among `of` created here. Machines that
+    /// are still members are never touched. Returns how many sessions were ended.
+    pub async fn kill_tmux_sessions_of(&self, of: &[MachineId]) -> u32 {
+        let roster = self.roster_snapshot();
+        let doomed: Vec<String> = match self.tmux_owners.lock() {
+            Ok(g) => g
+                .iter()
+                .filter(|(_, owner)| of.contains(owner) && roster.tombstones.contains_key(owner))
+                .map(|(name, _)| name.clone())
+                .collect(),
+            Err(_) => return 0,
+        };
+        let Some(tmux) = shell::which("tmux") else { return 0 };
+        let socket = self.config().tmux_socket();
+        let mut n = 0;
+        for name in &doomed {
+            if shell::tmux_kill_session(&tmux, socket.as_deref(), name).await {
+                n += 1;
+            }
+        }
+        let snapshot = match self.tmux_owners.lock() {
+            Ok(mut g) => {
+                for name in &doomed {
+                    g.remove(name);
+                }
+                g.clone()
+            }
+            Err(_) => return n,
+        };
+        let _ = crate::addrs::save_tmux_owners(&self.paths, &snapshot);
+        n
     }
 
     // ---------------------------------------------------------------- IPC operations
@@ -952,7 +1367,7 @@ impl Daemon {
         };
         match proto::parse_json::<Reply>(&reply, MAX_HEADER)? {
             Reply::Ok => {}
-            Reply::Refused { reason } => bail!("{} refused: {reason}", peer.name),
+            Reply::Refused { reason } => bail!("{} refused: {}", peer.name, crate::term::safe_text(&reason, 300, false)),
         }
         let path = net::selected_path(&conn);
         Ok((
@@ -964,7 +1379,24 @@ impl Daemon {
         ))
     }
 
+    /// Ask member `id` to end the tmux sessions the (revoked) machines `of` created there.
+    pub async fn remote_kill_sessions(self: &Arc<Self>, id: MachineId, of: Vec<MachineId>) -> Result<u32> {
+        timeout(Duration::from_secs(10), async {
+            let conn = self.connect(id).await?;
+            let (mut send, mut recv) = open_service(&conn, Service::KillSessions { of }).await?;
+            let n: u32 = proto::parse_json(&proto::expect_frame(&mut recv, FrameType::Json).await?, MAX_HEADER)?;
+            let _ = send.finish();
+            Ok(n)
+        })
+        .await
+        .map_err(|_| anyhow!("no answer within 10 s"))?
+    }
+
     pub fn add_peer(&self, id: MachineId, name: &str) -> Result<String> {
+        // H5: outside test mode the pairing ritual is the only way into the mesh.
+        if self.paths.jaunt_home.is_none() {
+            bail!("adding a machine without the pairing ritual works only in test mode (JAUNT_HOME set); use jaunt link / jaunt join");
+        }
         if id == self.me {
             bail!("that is this machine's own id");
         }
@@ -1000,6 +1432,30 @@ impl Daemon {
         self.edit_roster(format!("relays set to {list}"), |r| Ok(r.set_relays(relays, me, now_ms())))?;
         Ok(format!("relays: {list}"))
     }
+}
+
+/// L15: a detached daemon writes its log to `daemon.log` through stdout/stderr. Past 1 MiB
+/// it becomes `daemon.log.1` (replacing the older one) and a new file takes its place, as
+/// `events.jsonl` does. Only when stderr really is that file (not under systemd).
+fn rotate_own_log(log: &std::path::Path) {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    const MAX_LOG: u64 = 1 << 20;
+    let Ok(m) = std::fs::metadata(log) else { return };
+    if m.len() < MAX_LOG {
+        return;
+    }
+    let Ok(err) = rustix::fs::fstat(rustix::stdio::stderr()) else { return };
+    if err.st_ino != m.ino() || err.st_dev != m.dev() {
+        return;
+    }
+    let old = log.with_extension("log.1");
+    if std::fs::rename(log, &old).is_err() {
+        return;
+    }
+    let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(log) else { return };
+    // dup2 onto the standard descriptors replaces them in one step for every writer.
+    let _ = rustix::stdio::dup2_stdout(&f);
+    let _ = rustix::stdio::dup2_stderr(&f);
 }
 
 /// Marks a peer as "connecting" for as long as it lives (also when the dial is cancelled).
@@ -1038,4 +1494,25 @@ async fn open_service_nowait(conn: &Connection, service: Service) -> Result<(Sen
     let (mut send, recv) = conn.open_bi().await.context("cannot open a stream")?;
     proto::write_json(&mut send, FrameType::Header, &Hello { proto: PROTO_VERSION, service }).await?;
     Ok((send, recv))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// H1: what counts as coming back from an absence.
+    #[test]
+    fn absence_is_a_late_tick_or_a_long_silence() {
+        let t0 = 1_000_000;
+        let s = Settle::new(t0);
+        assert!(!s.absent(t0 + 1_000), "a normal second");
+        assert!(s.absent(t0 + TICK_GAP_MS + 1), "the monitor did not run: frozen or asleep");
+        s.last_tick.store(t0 + 70_000, Ordering::Relaxed);
+        assert!(s.absent(t0 + 70_500), "no contact with any member for over a minute");
+        s.last_settled.store(t0 + 70_000, Ordering::Relaxed);
+        assert!(!s.absent(t0 + 70_500), "but not again right after a settling round");
+        s.last_contact.store(t0 + 70_400, Ordering::Relaxed);
+        s.last_settled.store(0, Ordering::Relaxed);
+        assert!(!s.absent(t0 + 70_500), "recent contact");
+    }
 }

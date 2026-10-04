@@ -36,6 +36,9 @@ impl Members {
     pub fn contains(&self, id: &MachineId) -> bool {
         self.0.read().map(|g| g.contains(id)).unwrap_or(false)
     }
+    pub fn snapshot(&self) -> Arc<HashSet<MachineId>> {
+        self.0.read().map(|g| g.clone()).unwrap_or_default()
+    }
 }
 
 /// Rejects every remote that is not a current member, before any stream is accepted.
@@ -161,11 +164,16 @@ pub async fn build_pair_endpoint(secret: SecretKey, relays: &[RelayUrl], relay_c
         .context("cannot start the pairing endpoint")
 }
 
-/// What to dial for a peer: its id plus every relay (no address lookup exists).
-pub fn dial_addr(id: MachineId, relays: &[RelayUrl]) -> Result<EndpointAddr> {
+/// What to dial for a peer: its id, every relay (no address lookup exists), and the direct
+/// addresses it was last reached on (`hints`). The hints only say where to try: the peer is
+/// still authenticated by its key, so a stale one costs a failed attempt and nothing more.
+pub fn dial_addr(id: MachineId, relays: &[RelayUrl], hints: &[SocketAddr]) -> Result<EndpointAddr> {
     let mut addr = EndpointAddr::new(id.to_endpoint()?);
     for r in relays {
         addr = addr.with_relay_url(r.clone());
+    }
+    for h in hints {
+        addr = addr.with_ip_addr(*h);
     }
     Ok(addr)
 }

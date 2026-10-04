@@ -60,12 +60,35 @@ fn tmux_version_at_least_3(v: &str) -> bool {
     num.split('.').next().and_then(|m| m.parse::<u32>().ok()).is_some_and(|m| m >= 3)
 }
 
+/// Find a program on PATH. Only absolute PATH entries count: an empty or relative entry
+/// (`::`, `.`) would make the program depend on the current directory (L2).
 pub fn which(name: &str) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
+        .filter(|d| d.is_absolute())
         .map(|d| d.join(name))
         .find(|p| p.metadata().map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false))
+}
+
+/// Does jaunt's tmux server have a session with exactly this name?
+pub async fn tmux_has_session(tmux: &std::path::Path, socket: Option<&str>, session: &str) -> bool {
+    let mut c = tmux_command(tmux, socket);
+    c.args(["has-session", "-t", &format!("={session}")])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    matches!(tokio::time::timeout(Duration::from_secs(2), c.status()).await, Ok(Ok(st)) if st.success())
+}
+
+/// End the session with exactly this name; true when tmux did.
+pub async fn tmux_kill_session(tmux: &std::path::Path, socket: Option<&str>, session: &str) -> bool {
+    let mut c = tmux_command(tmux, socket);
+    c.args(["kill-session", "-t", &format!("={session}")])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    matches!(tokio::time::timeout(Duration::from_secs(2), c.status()).await, Ok(Ok(st)) if st.success())
 }
 
 fn home_dir() -> PathBuf {
@@ -313,7 +336,7 @@ pub async fn hop(paths: &Paths, target: &str, session: &str) -> Result<i32> {
     let code = 'outer: loop {
         let ended = match stream.take() {
             Some(s) => {
-                let r = session_loop(s, &mut stdin_rx, &mut sig, &mut escapes, &mut stdout).await;
+                let r = session_loop(s, &mut stdin_rx, &mut sig, &mut escapes, &mut stdout, paths, &peer).await;
                 match r {
                     Ok(e) => e,
                     Err(_) => Ended::Lost,
@@ -378,25 +401,76 @@ struct Signals {
     hup: tokio::signal::unix::Signal,
 }
 
+/// H3: typed input with no output back for this long, and nothing at all (data, acks,
+/// keep-alives) from the machine for this long, shows the stall line.
+const STALL_AFTER: Duration = Duration::from_secs(3);
+
+/// Ask the daemon how long the peer has been silent (`None`: no live connection).
+async fn peer_quiet(paths: &Paths, id: MachineId) -> Option<Option<u64>> {
+    let req = proto::IpcRequest::Quiet { id };
+    // Never starts a daemon: only asks the one that carries this session.
+    let ask = async {
+        let mut s = ipc::connect_existing(paths).await?;
+        ipc::send_request(&mut s, &req).await.ok()
+    };
+    match tokio::time::timeout(Duration::from_secs(1), ask).await {
+        Ok(Some(proto::IpcResponse::Quiet { quiet_ms })) => Some(quiet_ms),
+        _ => None,
+    }
+}
+
 async fn session_loop(
     stream: tokio::net::UnixStream,
     stdin_rx: &mut mpsc::Receiver<Vec<u8>>,
     sig: &mut Signals,
     escapes: &mut Escapes,
     stdout: &mut tokio::io::Stdout,
+    paths: &Paths,
+    peer: &proto::PeerRef,
 ) -> Result<Ended> {
     let (r, mut w) = stream.into_split();
     let mut frames = proto::frame_reader(r);
     // Re-send the size: the window may have changed while the link was down.
     let (c, rws) = term::size();
     proto::write_frame(&mut w, FrameType::Resize, &proto::encode_resize(c, rws)).await?;
+    // The first input that has not been answered by any output yet.
+    let mut pending_since: Option<tokio::time::Instant> = None;
+    let mut stalled = false;
+    let mut check = tokio::time::interval(Duration::from_secs(1));
+    check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
+            _ = check.tick(), if pending_since.is_some_and(|t| t.elapsed() >= STALL_AFTER) => {
+                // Silence after typing may be a quiet program (a password prompt): only the
+                // daemon knows whether the machine itself still answers (acks, keep-alives).
+                let quiet = match peer_quiet(paths, peer.id).await {
+                    Some(Some(ms)) => (ms >= STALL_AFTER.as_millis() as u64).then_some(ms / 1000),
+                    Some(None) => pending_since.map(|t| t.elapsed().as_secs()),
+                    None => None,
+                };
+                match quiet {
+                    Some(s) => {
+                        let (_, rows) = term::size();
+                        let line = ui::stalled_line(&peer.name, s.max(STALL_AFTER.as_secs()));
+                        stdout.write_all(format!("\x1b7\x1b[{rows};1H\x1b[2K{line}\x1b8").as_bytes()).await?;
+                        stdout.flush().await?;
+                        stalled = true;
+                    }
+                    None if stalled => {
+                        redraw_remote(&mut w).await?;
+                        stalled = false;
+                    }
+                    None => {}
+                }
+            }
             input = stdin_rx.recv() => {
                 let Some(input) = input else { return Ok(Ended::Disconnected) };
                 let (bytes, action) = escapes.feed(&input);
                 if !bytes.is_empty() && proto::write_frame(&mut w, FrameType::Data, &bytes).await.is_err() {
                     return Ok(Ended::Lost);
+                }
+                if !bytes.is_empty() && pending_since.is_none() {
+                    pending_since = Some(tokio::time::Instant::now());
                 }
                 match action {
                     Some(EscapeAction::Disconnect) => return Ok(Ended::Disconnected),
@@ -418,11 +492,17 @@ async fn session_loop(
             f = frames.recv() => match f {
                 Some(Ok(f)) => match f.kind {
                     FrameType::Data => {
+                        pending_since = None;
+                        if stalled {
+                            stalled = false;
+                            redraw_remote(&mut w).await?;
+                        }
                         stdout.write_all(&f.payload).await?;
                         stdout.flush().await?;
                     }
                     FrameType::Notice => {
-                        let text = String::from_utf8_lossy(&f.payload).replace('\n', "\r\n");
+                        // From the host, printed outside the PTY data: no escapes (R5).
+                        let text = term::safe_text(&String::from_utf8_lossy(&f.payload), 500, true).replace('\n', "\r\n");
                         stdout.write_all(format!("\r\njaunt: {text}\r\n").as_bytes()).await?;
                     }
                     FrameType::Exit => {
@@ -435,6 +515,15 @@ async fn session_loop(
             },
         }
     }
+}
+
+/// The stall line was drawn over the bottom row: make the remote side redraw the screen
+/// (two resizes make tmux, or any full-screen program, repaint everything).
+async fn redraw_remote(w: &mut tokio::net::unix::OwnedWriteHalf) -> Result<()> {
+    let (c, r) = term::size();
+    proto::write_frame(w, FrameType::Resize, &proto::encode_resize(c, r.saturating_sub(1).max(1))).await?;
+    proto::write_frame(w, FrameType::Resize, &proto::encode_resize(c, r)).await?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -19,8 +19,14 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::paths::{Paths, read_capped, write_private_atomic};
 
 pub const MAX_NAME: usize = 32;
-pub const MAX_ENTRIES: usize = 256;
-pub const MAX_TOMBSTONES: usize = 4096;
+/// Current members (entries without a tombstone).
+pub const MAX_MEMBERS: usize = 256;
+/// Entries of every kind, including those of revoked machines (kept for their names).
+pub const MAX_ENTRIES: usize = 1024;
+/// Tombstones for ids that have no entry here. Tombstones for known ids are never refused
+/// (at most one per entry), so the total stays below `MAX_ENTRIES + MAX_FOREIGN_TOMBSTONES`.
+pub const MAX_FOREIGN_TOMBSTONES: usize = 512;
+pub const MAX_TOMBSTONES: usize = MAX_ENTRIES + MAX_FOREIGN_TOMBSTONES;
 pub const MAX_RELAYS: usize = 8;
 pub const MAX_RELAY_URL: usize = 256;
 const MAX_ROSTER_FILE: u64 = 1 << 20;
@@ -163,6 +169,10 @@ impl Roster {
 
     /// Check a roster (from disk or from a peer) for shape and size.
     pub fn validate(&self) -> Result<()> {
+        let members = self.members().count();
+        if members > MAX_MEMBERS {
+            bail!("roster has {members} members (limit {MAX_MEMBERS})");
+        }
         if self.entries.len() > MAX_ENTRIES {
             bail!("roster has {} entries (limit {MAX_ENTRIES})", self.entries.len());
         }
@@ -226,6 +236,84 @@ impl Roster {
             self.fleet = other.fleet.clone();
         }
         *self != before
+    }
+
+    /// Merge a roster that came from another machine without ever exceeding the limits,
+    /// and without letting the limits block a revocation (R1): tombstones go first, and a
+    /// tombstone for an id this roster knows is always taken; only tombstones for unknown
+    /// ids, and new entries, are skipped once the limits are reached. Below the limits it
+    /// is exactly `merge`. Returns (changed, how many items were skipped).
+    pub fn merge_bounded(&mut self, other: &Roster) -> (bool, usize) {
+        let before = self.clone();
+        let mut skipped = 0;
+        for (id, theirs) in &other.tombstones {
+            match self.tombstones.get(id) {
+                Some(ours) if (ours.revoked_at, ours.revoked_by) <= (theirs.revoked_at, theirs.revoked_by) => {}
+                Some(_) => {
+                    self.tombstones.insert(*id, theirs.clone());
+                }
+                None => {
+                    let known = self.entries.contains_key(id) || other.entries.contains_key(id);
+                    let foreign = self.tombstones.keys().filter(|t| !self.entries.contains_key(t)).count();
+                    if known || foreign < MAX_FOREIGN_TOMBSTONES {
+                        self.tombstones.insert(*id, theirs.clone());
+                    } else {
+                        skipped += 1;
+                    }
+                }
+            }
+        }
+        for (id, theirs) in &other.entries {
+            match self.entries.get(id) {
+                Some(ours) if ours.rank() >= theirs.rank() => {}
+                Some(_) => {
+                    self.entries.insert(*id, theirs.clone());
+                }
+                None => {
+                    let revoked = self.tombstones.contains_key(id);
+                    let room = self.entries.len() < MAX_ENTRIES && (revoked || self.members().count() < MAX_MEMBERS);
+                    if room {
+                        self.entries.insert(*id, theirs.clone());
+                    } else {
+                        skipped += 1;
+                    }
+                }
+            }
+        }
+        let rank = |f: &Fleet| (f.updated_at, f.updated_by, f.relays.clone());
+        if rank(&other.fleet) > rank(&self.fleet) {
+            self.fleet = other.fleet.clone();
+        }
+        (*self != before, skipped)
+    }
+
+    /// Drop what cannot be right in a roster from another machine, item by item, instead of
+    /// refusing the whole roster (which would also refuse its tombstones): entries filed
+    /// under another id, with a bad name, or whose id is not an ed25519 public key;
+    /// tombstones filed under another id; fleet settings with a bad relay list.
+    pub fn drop_malformed(&mut self) -> Vec<String> {
+        let mut dropped = Vec::new();
+        self.entries.retain(|k, e| {
+            let ok = *k == e.id && valid_name(&e.name) && e.id.to_endpoint().is_ok();
+            if !ok {
+                dropped.push(format!("entry {} (malformed)", k.short()));
+            }
+            ok
+        });
+        self.tombstones.retain(|k, t| {
+            let ok = *k == t.id;
+            if !ok {
+                dropped.push(format!("tombstone {} (filed under another id)", k.short()));
+            }
+            ok
+        });
+        let fleet_ok = self.fleet.relays.len() <= MAX_RELAYS
+            && self.fleet.relays.iter().all(|r| r.len() <= MAX_RELAY_URL && r.parse::<iroh::RelayUrl>().is_ok());
+        if !fleet_ok {
+            dropped.push("fleet settings (bad relay list)".into());
+            self.fleet = Fleet::default();
+        }
+        dropped
     }
 
     /// Add (or re-add with a new name) a machine. Refuses a tombstoned id.
@@ -574,6 +662,72 @@ mod tests {
                 assert!(ab.tombstones.contains_key(t));
             }
         }
+    }
+
+    #[test]
+    fn bounded_merge_equals_merge_below_the_limits() {
+        let mut g = Gen(0x1234_5678_9abc_def1);
+        for _ in 0..300 {
+            let (mut a, mut b) = (g.roster(), g.roster());
+            a.sanitize_remote();
+            b.sanitize_remote();
+            let mut x = a.clone();
+            let (changed, skipped) = x.merge_bounded(&b);
+            assert_eq!(skipped, 0);
+            assert_eq!(x, merged(&a, &b));
+            assert_eq!(changed, x != a);
+        }
+    }
+
+    /// R1: a member pushes junk entries until the rosters are full. A tombstone that arrives
+    /// in the same or a later roster is still taken, and the result stays within the limits.
+    #[test]
+    fn full_rosters_never_block_a_tombstone() {
+        let id16 = |n: u16| {
+            let mut b = [0u8; 32];
+            b[..2].copy_from_slice(&n.to_be_bytes());
+            b[31] = 0x77;
+            MachineId(b)
+        };
+        let mut b = roster(&[entry(1, "a", 1, 1), entry(2, "b", 2, 1), entry(3, "c", 3, 1)], &[]);
+        let mut junk = Roster::default();
+        for n in 0..2000u16 {
+            let e = Entry { id: id16(n), name: "x".into(), added_at: 9, added_by: id(3), named_at: 9 };
+            junk.entries.insert(e.id, e);
+        }
+        for n in 2000..3000u16 {
+            junk.tombstones.insert(id16(n), Tombstone { id: id16(n), revoked_at: 9, revoked_by: id(3) });
+        }
+        let (changed, skipped) = b.merge_bounded(&junk);
+        assert!(changed && skipped > 0);
+        b.validate().expect("a bounded merge stays within the limits");
+        assert_eq!(b.members().count(), MAX_MEMBERS);
+        // Now a tells b that c (the junk pusher) is revoked, with more junk in the same roster.
+        let mut from_a = junk.clone();
+        from_a.tombstones.insert(id(3), Tombstone { id: id(3), revoked_at: 50, revoked_by: id(1) });
+        b.merge_bounded(&from_a);
+        assert!(!b.is_member(&id(3)), "the revocation got through a full roster");
+        b.validate().unwrap();
+        // The unbounded union would have broken the limits (what used to make sync fail whole).
+        let mut naive = roster(&[entry(1, "a", 1, 1), entry(2, "b", 2, 1), entry(3, "c", 3, 1)], &[]);
+        naive.merge(&from_a);
+        assert!(naive.validate().is_err());
+    }
+
+    #[test]
+    fn malformed_items_are_dropped_one_by_one() {
+        let good = MachineId::from_endpoint(&iroh::SecretKey::from_bytes(&[9; 32]).public());
+        let not_a_key = MachineId([2; 32]);
+        assert!(not_a_key.to_endpoint().is_err());
+        let mut r = roster(&[], &[(5, 10, 1)]);
+        r.entries.insert(good, Entry { id: good, name: "ok".into(), added_at: 1, added_by: good, named_at: 1 });
+        r.entries.insert(not_a_key, Entry { id: not_a_key, name: "ghost".into(), added_at: 1, added_by: good, named_at: 1 });
+        r.fleet.relays = vec!["not a url".into()];
+        let dropped = r.drop_malformed();
+        assert_eq!(dropped.len(), 2, "{dropped:?}");
+        assert!(r.entries.contains_key(&good) && !r.entries.contains_key(&not_a_key));
+        assert!(r.tombstones.contains_key(&id(5)), "tombstones survive");
+        assert_eq!(r.fleet, Fleet::default());
     }
 
     #[test]

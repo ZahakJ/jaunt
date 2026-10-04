@@ -2,6 +2,7 @@
 
 mod awake;
 mod check;
+mod addrs;
 mod children;
 mod cli_trust;
 mod config;
@@ -67,7 +68,9 @@ enum Cmd {
     },
     /// Copy files or directories; one side is machine:path (`jaunt cp notes.txt fern:docs/`).
     Cp { src: String, dst: String },
-    /// Forward a local port to a machine's loopback: `jaunt fwd fern 8080[:9090]`.
+    /// Forward a local port to a machine's loopback: `jaunt fwd fern 8080[:9090]`. The local
+    /// end listens on 127.0.0.1, so every user of this machine can use it while it runs
+    /// (as with ssh -L); on a shared machine forward only what anyone here may reach.
     Fwd {
         machine: String,
         /// <port>[:<localport>]
@@ -87,10 +90,13 @@ enum Cmd {
         #[arg(long)]
         yes: bool,
     },
-    /// Join a mesh with the code another machine's 'jaunt link' shows.
+    /// Join a mesh with the code another machine's 'jaunt link' shows. Run it without the
+    /// code and type the code when asked (or pipe it in): a code on the command line can be
+    /// read by every other user of this machine while the join runs.
     Join {
-        /// The code, e.g. 4127-tremor-kudos (spaces instead of dashes are fine).
-        #[arg(required = true, num_args = 1..)]
+        /// The code, e.g. 4127-tremor-kudos (spaces instead of dashes are fine). Better left
+        /// out: then it is asked for.
+        #[arg(num_args = 0..)]
         code: Vec<String>,
         /// Relay URL, when this machine does not know one yet.
         #[arg(long)]
@@ -105,6 +111,10 @@ enum Cmd {
         /// Also revoke every machine it added.
         #[arg(long)]
         cascade: bool,
+        /// Also end the tmux sessions that machine created, here and on every machine that
+        /// confirms the revocation (what runs inside them is ended with them).
+        #[arg(long)]
+        kill_sessions: bool,
     },
     /// Take this machine out of the mesh and wipe its key and roster.
     Leave {
@@ -211,6 +221,15 @@ fn main() {
     let cli = Cli::parse();
     ui::theme::set_no_color_flag(cli.no_color);
     let daemon = matches!(cli.cmd, Some(Cmd::Daemon));
+    if daemon {
+        // L2: however the daemon was started, it does not stay in (or keep busy) the
+        // directory it was started from, and its PATH holds absolute directories only, so
+        // no helper (tmux, systemd-inhibit, busctl, systemctl) is ever found relative to it.
+        let _ = std::env::set_current_dir(ipc::daemon_dir());
+        let path = ipc::clean_path(std::env::var_os("PATH").as_deref());
+        // SAFETY: still single-threaded here: the async runtime is built below.
+        unsafe { std::env::set_var("PATH", path) };
+    }
     init_logging(daemon);
     let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(rt) => rt,
@@ -224,7 +243,8 @@ fn main() {
             Ok(code) => code,
             Err(e) => {
                 term::restore();
-                eprintln!("jaunt: {e:#}");
+                // Errors can carry text from another machine: no escapes reach the terminal.
+                eprintln!("jaunt: {}", term::safe_text(&format!("{e:#}"), 4000, true));
                 1
             }
         }
@@ -295,7 +315,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
         Some(Cmd::Relay { action }) => relay(&paths, action).await,
         Some(Cmd::Link { yes }) => cli_trust::link(&paths, yes).await,
         Some(Cmd::Join { code, relay, yes }) => cli_trust::join(&paths, code, relay, yes).await,
-        Some(Cmd::Unlink { name, cascade }) => cli_trust::unlink(&paths, name, cascade).await,
+        Some(Cmd::Unlink { name, cascade, kill_sessions }) => cli_trust::unlink(&paths, name, cascade, kill_sessions).await,
         Some(Cmd::Leave { yes }) => cli_trust::leave(&paths, yes).await,
         Some(Cmd::Check) => Ok(if check::run(&paths).await? > 0 { 1 } else { 0 }),
         Some(Cmd::Reset { yes }) => reset(&paths, yes).await,

@@ -9,12 +9,30 @@ use anyhow::{Context, Result, bail};
 
 use crate::paths::Paths;
 
-pub fn unit_text(exe: &Path, paths: &Paths) -> String {
+/// One argument for a unit file line, quoted so systemd reads it back unchanged (L11):
+/// in double quotes, with `\` and `"` escaped and `%` (a specifier) doubled; on a command
+/// line (`exec`) also `$` doubled, which ExecStart= would expand as a variable.
+fn sd_quote(s: &str, exec: bool) -> Result<String> {
+    if s.chars().any(|c| c.is_control()) {
+        bail!("cannot put a path with control characters into a systemd unit: {s:?}");
+    }
+    let mut q = s.replace('\\', "\\\\").replace('"', "\\\"").replace('%', "%%");
+    if exec {
+        q = q.replace('$', "$$");
+    }
+    Ok(format!("\"{q}\""))
+}
+
+pub fn unit_text(exe: &Path, paths: &Paths) -> Result<String> {
+    let exe = exe.to_str().context("the jaunt binary's path is not UTF-8")?;
     let env = match &paths.jaunt_home {
-        Some(h) => format!("Environment=JAUNT_HOME={}\n", h.display()),
+        Some(h) => {
+            let h = h.to_str().context("JAUNT_HOME is not UTF-8")?;
+            format!("Environment={}\n", sd_quote(&format!("JAUNT_HOME={h}"), false)?)
+        }
         None => String::new(),
     };
-    format!(
+    Ok(format!(
         "[Unit]\n\
          Description=jaunt daemon (links this machine to the owner's other machines)\n\
          After=network-online.target\n\
@@ -31,8 +49,8 @@ pub fn unit_text(exe: &Path, paths: &Paths) -> String {
          \n\
          [Install]\n\
          WantedBy=default.target\n",
-        exe = exe.display()
-    )
+        exe = sd_quote(exe, true)?
+    ))
 }
 
 fn systemctl(args: &[&str]) -> Result<()> {
@@ -49,7 +67,7 @@ pub fn up(paths: &Paths) -> Result<()> {
     let exe = std::env::current_exe().context("cannot find the jaunt binary path")?;
     let unit = paths.unit_file();
     std::fs::create_dir_all(&paths.systemd_user_dir)?;
-    std::fs::write(&unit, unit_text(&exe, paths)).with_context(|| format!("cannot write {}", unit.display()))?;
+    std::fs::write(&unit, unit_text(&exe, paths)?).with_context(|| format!("cannot write {}", unit.display()))?;
     println!("wrote {}", unit.display());
     if paths.jaunt_home.is_some() {
         println!("JAUNT_HOME is set: not asking systemd to start it (test mode)");
@@ -102,4 +120,21 @@ pub fn watchdog_interval() -> Option<Duration> {
         return None;
     }
     Some(Duration::from_micros(usec / 2).max(Duration::from_millis(500)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// L11: a space, a `%`, a quote or a backslash in a path cannot change what systemd runs.
+    #[test]
+    fn unit_paths_are_quoted_and_specifiers_escaped() {
+        let p = Paths::under(Path::new("/x/jaunt home%h"));
+        let t = unit_text(Path::new("/a/odd dir%h/$HOME/ja\"unt\\"), &p).unwrap();
+        assert!(t.contains("ExecStart=\"/a/odd dir%%h/$$HOME/ja\\\"unt\\\\\" daemon\n"), "{t}");
+        assert!(t.contains("Environment=\"JAUNT_HOME=/x/jaunt home%%h\"\n"), "{t}");
+        assert!(unit_text(Path::new("/a/b\nExecStartPre=/bin/evil"), &p).is_err());
+        let plain = unit_text(Path::new("/home/u/.local/bin/jaunt"), &Paths::under(Path::new("/j"))).unwrap();
+        assert!(plain.contains("ExecStart=\"/home/u/.local/bin/jaunt\" daemon"));
+    }
 }

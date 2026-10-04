@@ -166,11 +166,36 @@ impl Escapes {
     }
 }
 
+/// Text that came from another machine (or passed through the daemon) and is about to be
+/// printed outside the raw PTY data path: every control character (C0, DEL, C1, which
+/// includes ESC and the 8-bit CSI) becomes `?`, except `\n` when `newlines` is true, and the
+/// result is cut to `max` characters. No escape sequence can reach the terminal through it.
+pub fn safe_text(s: &str, max: usize, newlines: bool) -> String {
+    let mut out: String = s
+        .chars()
+        .take(max)
+        .map(|c| if c.is_control() && !(newlines && c == '\n') { '?' } else { c })
+        .collect();
+    if s.chars().nth(max).is_some() {
+        out.push('…');
+    }
+    out
+}
+
 pub const ESCAPE_HELP: &str = "\r\nSupported escape sequences (after Enter):\r\n  ~.  disconnect (the session stays on the host)\r\n  ~?  this help\r\n  ~~  send a literal ~\r\n";
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn safe_text_strips_every_escape() {
+        let evil = "a\x1b]52;c;Y3VybA==\x07b\u{9b}31mc\rd\ne\x7f";
+        assert_eq!(safe_text(evil, 100, false), "a?]52;c;Y3VybA==?b?31mc?d?e?");
+        assert_eq!(safe_text(evil, 100, true), "a?]52;c;Y3VybA==?b?31mc?d\ne?");
+        assert_eq!(safe_text("héllo °C", 100, false), "héllo °C");
+        assert_eq!(safe_text("abcdef", 3, false), "abc…");
+    }
 
     #[test]
     fn disconnect_at_line_start() {

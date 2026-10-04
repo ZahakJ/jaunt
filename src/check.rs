@@ -169,6 +169,9 @@ impl Out {
         self.fails += 1;
         println!("fail\t{}", msg.as_ref());
     }
+    fn info(&mut self, msg: impl AsRef<str>) {
+        println!("info\t{}", msg.as_ref());
+    }
 }
 
 /// Returns the number of failures.
@@ -230,7 +233,7 @@ pub async fn run(paths: &Paths) -> Result<usize> {
         }
     };
     check_relay(&st, rep.as_ref(), &mut o);
-    check_peers(&st, &mut o);
+    check_peers(&st, cfg.portmap.unwrap_or(false), &mut o);
     if let Some(r) = &rep {
         check_contacts(&st, r, &mut o);
     }
@@ -326,7 +329,7 @@ fn check_relay(st: &StatusSnapshot, rep: Option<&CheckReport>, o: &mut Out) {
     }
 }
 
-fn check_peers(st: &StatusSnapshot, o: &mut Out) {
+fn check_peers(st: &StatusSnapshot, portmap: bool, o: &mut Out) {
     if st.peers.is_empty() {
         o.warn("not linked to any other machine yet (jaunt link)");
         return;
@@ -347,9 +350,19 @@ fn check_peers(st: &StatusSnapshot, o: &mut Out) {
     }
     if direct.is_empty() {
         o.warn("no direct path to any machine: everything goes through the relay");
+        if !portmap {
+            // H4: an option, never a default: it asks the router to open a port.
+            o.info(portmap_hint());
+        }
     } else {
         o.ok(format!("direct path to {}", direct.join(", ")));
     }
+}
+
+pub fn portmap_hint() -> &'static str {
+    "port mapping is off (the default): with 'portmap = true' in config.toml jaunt asks the router \
+     (UPnP / NAT-PMP / PCP) to forward a UDP port to this machine, which can make direct paths possible. \
+     It changes the router's settings while jaunt runs; turn it on only if that is acceptable"
 }
 
 fn check_contacts(st: &StatusSnapshot, rep: &CheckReport, o: &mut Out) {

@@ -29,9 +29,10 @@ fn abs_env(name: &str) -> Option<PathBuf> {
 impl Paths {
     pub fn from_env() -> Result<Paths> {
         if let Some(h) = std::env::var_os("JAUNT_HOME").filter(|v| !v.is_empty()) {
-            let mut home = PathBuf::from(h);
+            let home = PathBuf::from(h);
+            // A relative JAUNT_HOME would mean a different home in every directory (L1).
             if !home.is_absolute() {
-                home = std::env::current_dir()?.join(home);
+                bail!("JAUNT_HOME must be an absolute path (it is {})", home.display());
             }
             return Ok(Paths::under(&home));
         }
@@ -77,8 +78,10 @@ impl Paths {
     pub fn socket(&self) -> PathBuf {
         self.runtime_dir.join("sock")
     }
+    /// The single-instance lock lives next to the key (L6): one daemon per identity, even
+    /// when two contexts disagree about XDG_RUNTIME_DIR. It records the daemon's socket.
     pub fn lock_file(&self) -> PathBuf {
-        self.runtime_dir.join("daemon.lock")
+        self.data_dir.join("daemon.lock")
     }
     pub fn daemon_log(&self) -> PathBuf {
         self.state_dir.join("daemon.log")
@@ -91,11 +94,30 @@ impl Paths {
     }
 }
 
-/// Create `dir` (and parents) and make sure the leaf is 0700.
+/// Create `dir` (and parents) and make sure the leaf is a real directory of this user,
+/// mode 0700. A symlink or a directory owned by someone else is refused (L7).
 pub fn private_dir(dir: &Path) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    check_owned_dir(dir)?;
     fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
         .with_context(|| format!("cannot set permissions on {}", dir.display()))?;
+    Ok(())
+}
+
+/// `dir` is a directory (not a symlink to one) owned by this user.
+pub fn check_owned_dir(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let m = fs::symlink_metadata(dir).with_context(|| format!("cannot look at {}", dir.display()))?;
+    if m.file_type().is_symlink() {
+        bail!("{} is a symbolic link; jaunt keeps its files only in a real directory of its own", dir.display());
+    }
+    if !m.is_dir() {
+        bail!("{} is not a directory", dir.display());
+    }
+    let me = rustix::process::getuid().as_raw();
+    if m.uid() != me {
+        bail!("{} belongs to another user (uid {}); refusing to use it", dir.display(), m.uid());
+    }
     Ok(())
 }
 

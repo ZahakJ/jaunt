@@ -577,6 +577,13 @@ fn now_ms() -> u64 {
     crate::roster::now_ms()
 }
 
+/// The last line off a terminal (or in a pane too narrow to draw in). The message can
+/// quote the other machine (PAIR-1), so it is never printed raw.
+fn plain_finish(ok: bool, msg: &str) -> String {
+    let msg = crate::term::safe_text(msg, 2000, true);
+    if ok { msg } else { format!("jaunt: {msg}") }
+}
+
 impl Ritual {
     /// The animated view when stdin and stdout are terminals; plain lines otherwise.
     pub fn start(role: PairRole, me: &str, code: Option<String>, yes: bool) -> Ritual {
@@ -657,10 +664,11 @@ impl Ritual {
     pub async fn finish(mut self, ok: bool, msg: &str) {
         self.st.finish(ok, msg);
         if self.fancy.is_none() {
+            let line = plain_finish(ok, msg);
             if ok {
-                println!("{msg}");
+                println!("{line}");
             } else {
-                eprintln!("jaunt: {msg}");
+                eprintln!("{line}");
             }
             return;
         }
@@ -687,5 +695,21 @@ impl Drop for Ritual {
             let _ = std::io::stdout().write_all(b"\r\n\x1b[?25h");
             let _ = std::io::stdout().flush();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// PAIR-1 / L9: the plain (non-tty, narrow pane) last line never carries a raw escape,
+    /// even when the daemon's error quotes the other machine's abort reason.
+    #[test]
+    fn plain_finish_line_has_no_escapes() {
+        let msg = "the other machine stopped: \x1b]52;c;Y3VybCBldmlsfHNo\x07\x1b]0;pwned\x07";
+        let line = plain_finish(false, msg);
+        assert!(!line.chars().any(|c| c.is_control()), "{line:?}");
+        assert!(line.starts_with("jaunt: the other machine stopped"));
+        assert_eq!(plain_finish(true, "linked fern"), "linked fern");
     }
 }

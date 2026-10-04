@@ -97,10 +97,13 @@ pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> Result<Option<Frame>
         return Err(FrameError::TooLarge(len));
     }
     let kind = FrameType::from_u8(head[4]).ok_or(FrameError::UnknownType(head[4]))?;
-    let mut payload = vec![0u8; len];
-    r.read_exact(&mut payload).await.map_err(|e| {
-        if e.kind() == std::io::ErrorKind::UnexpectedEof { FrameError::Truncated } else { FrameError::Io(e) }
-    })?;
+    // Grow as bytes arrive instead of reserving the announced length up front, so a header
+    // that promises 1 MiB costs memory only once the bytes are really there (N1).
+    let mut payload = Vec::with_capacity(len.min(64 * 1024));
+    (&mut *r).take(len as u64).read_to_end(&mut payload).await?;
+    if payload.len() < len {
+        return Err(FrameError::Truncated);
+    }
     Ok(Some(Frame { kind, payload }))
 }
 
@@ -226,6 +229,12 @@ pub enum Service {
         op: CopyOp,
         path: String,
     },
+    /// After `jaunt unlink --kill-sessions` (H9): end the tmux sessions that these machines
+    /// created on the host, for those of them the host has revoked. Reply is followed by
+    /// one `Json` frame with the number of sessions ended.
+    KillSessions {
+        of: Vec<crate::roster::MachineId>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -329,12 +338,18 @@ pub enum IpcRequest {
         target: String,
         #[serde(default)]
         cascade: bool,
+        /// Also end the tmux sessions the revoked machine(s) created, here and on every
+        /// member that confirmed.
+        #[serde(default)]
+        kill_sessions: bool,
     },
     /// Tombstone this machine and tell the others. -> `Told`s, then `Unlinked`. The client
     /// then stops the daemon and wipes the key and roster.
     Leave,
     /// What `jaunt check` needs beyond `Status`. -> `Check`
     Check,
+    /// How long since anything (data, acks, keep-alives) arrived from a peer. -> `Quiet`
+    Quiet { id: crate::roster::MachineId },
     /// Turn host mode (§9) on or off; persisted in config.toml. -> `Ok`
     SetHost { on: bool },
 }
@@ -355,6 +370,8 @@ pub enum IpcResponse {
     /// Result of `Unlink` / `Leave`.
     Unlinked(UnlinkReport),
     Check(CheckReport),
+    /// `quiet_ms`: since the last datagram from the peer; `None` without a live connection.
+    Quiet { quiet_ms: Option<u64> },
 }
 
 /// The daemon's view of the network, for `jaunt check`.
@@ -454,6 +471,10 @@ pub struct UnlinkReport {
     pub added_by_revoked: Vec<PeerRef>,
     /// Processes ended here because of the revocation.
     pub sessions_killed: u32,
+    /// With `kill_sessions`: tmux sessions the revoked machine(s) created, ended here and on
+    /// the members that confirmed; `None` when not asked for.
+    #[serde(default)]
+    pub tmux_sessions_killed: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

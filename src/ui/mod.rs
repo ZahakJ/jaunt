@@ -102,6 +102,20 @@ pub fn hop_banner_out(me: &str, peer: &str, session_kept: bool) -> String {
 }
 
 /// The single status line while the link is down.
+/// H3: the session is up but nothing has come back for a while (a roam, a dead Wi-Fi).
+pub fn stalled_line(peer: &str, quiet_s: u64) -> String {
+    let g = glyphs();
+    let dot = paint(&format!(" {} ", g.dot), Style::fg(theme::FAINT));
+    format!(
+        "{} {} {}{dot}{}{dot}{}",
+        paint(&canvas::clean(peer), Style::fg(theme::WHITE).bold()),
+        paint(&g.relay.to_string(), Style::fg(theme::AMBER)),
+        paint(&format!("no answer for {quiet_s}s"), Style::fg(theme::AMBER).bold()),
+        paint("waiting for the link", Style::fg(theme::DIM)),
+        paint("~. to give up", Style::fg(theme::DIM)),
+    )
+}
+
 pub fn link_lost_line(peer: &str, retry_in_s: u64) -> String {
     let g = glyphs();
     let dot = paint(&format!(" {} ", g.dot), Style::fg(theme::FAINT));

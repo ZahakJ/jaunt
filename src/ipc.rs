@@ -32,16 +32,26 @@ impl Drop for ServerGuard {
 }
 
 pub fn bind_server(paths: &Paths) -> Result<(UnixListener, ServerGuard)> {
+    private_dir(&paths.data_dir)?;
     private_dir(&paths.runtime_dir)?;
-    let lock = fs::OpenOptions::new()
+    let mut lock = fs::OpenOptions::new()
         .create(true)
         .truncate(false)
+        .read(true)
         .write(true)
         .mode(0o600)
         .open(paths.lock_file())
         .context("cannot open the daemon lock file")?;
     if rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_err() {
-        bail!("another jaunt daemon is already running (lock {} is held)", paths.lock_file().display());
+        let elsewhere = recorded_socket(paths).map(|s| format!("; its socket is {}", s.display())).unwrap_or_default();
+        bail!("another jaunt daemon is already running with this key (lock {} is held{elsewhere})", paths.lock_file().display());
+    }
+    // Say where this daemon listens, for clients whose XDG_RUNTIME_DIR differs.
+    {
+        use std::io::{Seek, Write};
+        lock.set_len(0)?;
+        lock.seek(std::io::SeekFrom::Start(0))?;
+        lock.write_all(paths.socket().as_os_str().as_encoded_bytes())?;
     }
     let sock = paths.socket();
     let _ = fs::remove_file(&sock);
@@ -53,7 +63,15 @@ pub fn bind_server(paths: &Paths) -> Result<(UnixListener, ServerGuard)> {
 pub async fn serve(d: Arc<Daemon>, listener: UnixListener) {
     let uid = rustix::process::getuid().as_raw();
     loop {
-        let Ok((stream, _)) = listener.accept().await else { continue };
+        let stream = match listener.accept().await {
+            Ok((s, _)) => s,
+            Err(e) => {
+                // Out of file descriptors and the like: do not spin a core on it (L15).
+                tracing::warn!("ipc accept failed: {e}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
         match stream.peer_cred() {
             Ok(c) if c.uid() == uid => {}
             _ => continue,
@@ -101,10 +119,13 @@ async fn handle(d: Arc<Daemon>, mut s: UnixStream) -> Result<()> {
         IpcRequest::PairAnswer { .. } => {
             reply(&mut s, &IpcResponse::Error { message: "no link or join is waiting for an answer on this connection".into() }).await
         }
-        IpcRequest::Unlink { target, cascade } => crate::trust::serve_ipc(d, s, crate::trust::Request::Unlink { target, cascade }).await,
+        IpcRequest::Unlink { target, cascade, kill_sessions } => {
+            crate::trust::serve_ipc(d, s, crate::trust::Request::Unlink { target, cascade, kill_sessions }).await
+        }
         IpcRequest::Leave => crate::trust::serve_ipc(d, s, crate::trust::Request::Leave).await,
         IpcRequest::SetHost { on } => reply(&mut s, &result(d.set_host(on))).await,
         IpcRequest::Check => reply(&mut s, &IpcResponse::Check(crate::check::report(&d).await)).await,
+        IpcRequest::Quiet { id } => reply(&mut s, &IpcResponse::Quiet { quiet_ms: d.quiet_ms(&id) }).await,
         IpcRequest::Shutdown => {
             reply(&mut s, &IpcResponse::Ok { message: "daemon stopping".into() }).await?;
             d.shutdown();
@@ -165,16 +186,57 @@ async fn subscribe(d: &Arc<Daemon>, s: UnixStream, history: usize) -> Result<()>
 
 // ------------------------------------------------------------------------- client side
 
+/// The socket the running daemon wrote into the lock file, if any.
+fn recorded_socket(paths: &Paths) -> Option<PathBuf> {
+    let text = crate::paths::read_capped(&paths.lock_file(), 4096).ok().flatten()?;
+    let s = String::from_utf8(text).ok()?;
+    let p = PathBuf::from(s.trim());
+    p.is_absolute().then_some(p)
+}
+
+/// Connect to a socket and make sure this user's own daemon is on the other end (L7):
+/// the directory holding it is a real directory of this user, and the process that
+/// accepted runs as this user.
+async fn connect_checked(sock: &std::path::Path) -> Result<UnixStream> {
+    if let Some(dir) = sock.parent() {
+        crate::paths::check_owned_dir(dir)?;
+    }
+    let s = UnixStream::connect(sock).await?;
+    let uid = rustix::process::getuid().as_raw();
+    match s.peer_cred() {
+        Ok(c) if c.uid() == uid => Ok(s),
+        Ok(c) => bail!("the socket {} is served by another user (uid {}); refusing to talk to it", sock.display(), c.uid()),
+        Err(e) => bail!("cannot check who serves {}: {e}", sock.display()),
+    }
+}
+
+/// This home's daemon: at our socket, or where the lock file says it listens (L6).
+async fn connect_any(paths: &Paths) -> Result<UnixStream> {
+    let sock = paths.socket();
+    let first = connect_checked(&sock).await;
+    if first.is_ok() {
+        return first;
+    }
+    if let Some(other) = recorded_socket(paths).filter(|o| *o != sock)
+        && let Ok(s) = connect_checked(&other).await
+    {
+        return Ok(s);
+    }
+    first
+}
+
 /// Connect to the daemon, starting it if it is not running.
 pub async fn connect(paths: &Paths) -> Result<UnixStream> {
-    let sock = paths.socket();
-    if let Ok(s) = UnixStream::connect(&sock).await {
-        return Ok(s);
+    match connect_any(paths).await {
+        Ok(s) => return Ok(s),
+        // Someone else's socket or directory: say so, never start a daemon next to it.
+        Err(e) if e.downcast_ref::<std::io::Error>().is_none() => return Err(e),
+        Err(_) => {}
     }
     start_daemon(paths)?;
     for _ in 0..100 {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        if let Ok(s) = UnixStream::connect(&sock).await {
+        if let Ok(s) = connect_any(paths).await {
             return Ok(s);
         }
     }
@@ -183,7 +245,7 @@ pub async fn connect(paths: &Paths) -> Result<UnixStream> {
 
 /// Connect only if the daemon is already running.
 pub async fn connect_existing(paths: &Paths) -> Option<UnixStream> {
-    UnixStream::connect(paths.socket()).await.ok()
+    connect_any(paths).await.ok()
 }
 
 fn start_daemon(paths: &Paths) -> Result<()> {
@@ -201,12 +263,16 @@ fn start_daemon(paths: &Paths) -> Result<()> {
         .context("cannot open the daemon log")?;
     let exe = std::env::current_exe().context("cannot find the jaunt binary")?;
     let mut cmd = std::process::Command::new(exe);
+    // L2/L15: the daemon outlives this command and serves every peer, so it gets neither
+    // this command's directory nor its whole environment (tokens, agent sockets): a fixed
+    // directory, an allowlisted environment and a PATH of absolute directories only.
     cmd.arg("daemon")
         .stdin(std::process::Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log)
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE");
+        .current_dir(daemon_dir())
+        .env_clear()
+        .envs(daemon_env(std::env::vars_os()));
     // SAFETY: setsid is async-signal-safe; detaches from this terminal's session.
     unsafe {
         use std::os::unix::process::CommandExt;
@@ -218,6 +284,46 @@ fn start_daemon(paths: &Paths) -> Result<()> {
     let child = cmd.spawn().context("cannot start the jaunt daemon")?;
     eprintln!("jaunt: started the daemon (pid {}, log {})", child.id(), paths.daemon_log().display());
     Ok(())
+}
+
+/// Where a daemon runs: the home directory, else `/`.
+pub fn daemon_dir() -> PathBuf {
+    std::env::var_os("HOME").map(PathBuf::from).filter(|p| p.is_absolute() && p.is_dir()).unwrap_or_else(|| PathBuf::from("/"))
+}
+
+/// PATH without empty or relative entries (each would make a program name resolve against
+/// the current directory), and without repeats. Never empty.
+pub fn clean_path(path: Option<&std::ffi::OsStr>) -> std::ffi::OsString {
+    let mut seen = Vec::new();
+    if let Some(p) = path {
+        for d in std::env::split_paths(p) {
+            if d.is_absolute() && !seen.contains(&d) {
+                seen.push(d);
+            }
+        }
+    }
+    if seen.is_empty() {
+        return "/usr/local/bin:/usr/bin:/bin".into();
+    }
+    std::env::join_paths(seen).unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".into())
+}
+
+/// The environment a self-started daemon keeps: identity, locale, session plumbing that
+/// host mode needs (D-Bus, XDG), jaunt's own settings, and a cleaned PATH.
+pub fn daemon_env(vars: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    const KEEP: &[&str] = &["HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TZ", "DBUS_SESSION_BUS_ADDRESS", "TMUX_TMPDIR"];
+    let mut out = Vec::new();
+    let mut path = None;
+    for (k, v) in vars {
+        let Some(name) = k.to_str() else { continue };
+        if name == "PATH" {
+            path = Some(v);
+        } else if KEEP.contains(&name) || name.starts_with("LC_") || name.starts_with("XDG_") || name.starts_with("JAUNT_") {
+            out.push((k, v));
+        }
+    }
+    out.push(("PATH".into(), clean_path(path.as_deref())));
+    out
 }
 
 pub async fn send_request(s: &mut UnixStream, req: &IpcRequest) -> Result<IpcResponse> {
@@ -248,5 +354,33 @@ pub async fn open(paths: &Paths, target: &str, service: Service) -> Result<(Unix
         IpcResponse::Opened { peer, path, rtt_ms } => Ok((s, peer, path, rtt_ms)),
         IpcResponse::Error { message } => bail!("{message}"),
         other => bail!("unexpected answer from the daemon: {other:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    /// L2: an empty or relative PATH entry never reaches the daemon.
+    #[test]
+    fn daemon_path_has_only_absolute_entries() {
+        assert_eq!(clean_path(Some("/nonexistent::/usr/bin:.:bin:/usr/bin".as_ref())), OsString::from("/nonexistent:/usr/bin"));
+        assert_eq!(clean_path(Some("::.".as_ref())), OsString::from("/usr/local/bin:/usr/bin:/bin"));
+        assert_eq!(clean_path(None), OsString::from("/usr/local/bin:/usr/bin:/bin"));
+    }
+
+    /// L15: tokens and agent sockets of the command that started the daemon stay behind.
+    #[test]
+    fn daemon_env_is_an_allowlist() {
+        let vars = [
+            ("HOME", "/home/x"), ("SSH_AUTH_SOCK", "/tmp/agent"), ("GITHUB_TOKEN", "t"), ("LC_ALL", "C.UTF-8"),
+            ("XDG_RUNTIME_DIR", "/run/user/1"), ("JAUNT_HOME", "/j"), ("PATH", "::/usr/bin"), ("TMUX", "/tmp/tmux"),
+        ]
+        .map(|(k, v)| (OsString::from(k), OsString::from(v)));
+        let env = daemon_env(vars.into_iter());
+        let names: Vec<String> = env.iter().map(|(k, _)| k.to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["HOME", "LC_ALL", "XDG_RUNTIME_DIR", "JAUNT_HOME", "PATH"]);
+        assert_eq!(env.last().unwrap().1, OsString::from("/usr/bin"));
     }
 }

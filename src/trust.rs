@@ -17,7 +17,7 @@ use crate::roster::{MachineId, Roster, now_ms};
 const PUSH_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub enum Request {
-    Unlink { target: String, cascade: bool },
+    Unlink { target: String, cascade: bool, kill_sessions: bool },
     Leave,
 }
 
@@ -25,7 +25,7 @@ pub async fn serve_ipc(d: Arc<Daemon>, mut s: UnixStream, req: Request) -> Resul
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<IpcResponse>();
     let work = async {
         match req {
-            Request::Unlink { target, cascade } => unlink(&d, &target, cascade, &tx).await,
+            Request::Unlink { target, cascade, kill_sessions } => unlink(&d, &target, cascade, kill_sessions, &tx).await,
             Request::Leave => leave(&d, &tx).await,
         }
     };
@@ -91,6 +91,7 @@ async fn unlink(
     d: &Arc<Daemon>,
     target: &str,
     cascade: bool,
+    kill_sessions: bool,
     tx: &tokio::sync::mpsc::UnboundedSender<IpcResponse>,
 ) -> Result<UnlinkReport> {
     let id = d.resolve(target)?;
@@ -117,12 +118,38 @@ async fn unlink(
     let wanted = victims.clone();
     let (confirmed, not_heard) =
         push_and_collect(d, others, None, move |r: &Roster| wanted.iter().all(|v| r.tombstones.contains_key(v)), tx).await;
+    let tmux_sessions_killed = if kill_sessions {
+        let of: Vec<MachineId> = victims.iter().copied().collect();
+        let mut n = d.kill_tmux_sessions_of(&of).await;
+        // The members that confirmed hold the tombstone, so they agree to end them too.
+        let mut tasks = Vec::new();
+        for p in &confirmed {
+            let (d2, id, of) = (d.clone(), p.id, of.clone());
+            tasks.push(tokio::spawn(async move { (id, d2.remote_kill_sessions(id, of).await) }));
+        }
+        for t in tasks {
+            let Ok((id, res)) = t.await else { continue };
+            let peer = d.peer_ref(&id);
+            let (ok, detail) = match res {
+                Ok(k) => {
+                    n += k;
+                    (true, format!("ended {k} tmux session(s) the revoked machine created there"))
+                }
+                Err(e) => (false, format!("could not end its tmux sessions there: {e:#}")),
+            };
+            let _ = tx.send(IpcResponse::Told { peer, ok, detail });
+        }
+        Some(n)
+    } else {
+        None
+    };
     Ok(UnlinkReport {
         revoked: refs(d, &after, victims),
         confirmed,
         not_heard,
         added_by_revoked: if cascade { Vec::new() } else { refs(d, &after, added) },
         sessions_killed: sessions_killed as u32,
+        tmux_sessions_killed,
     })
 }
 
@@ -145,5 +172,6 @@ async fn leave(d: &Arc<Daemon>, tx: &tokio::sync::mpsc::UnboundedSender<IpcRespo
         not_heard,
         added_by_revoked: Vec::new(),
         sessions_killed,
+        tmux_sessions_killed: None,
     })
 }

@@ -29,10 +29,10 @@ pub struct Config {
     /// tmux server socket name (`tmux -L <name>`); overridden by `JAUNT_TMUX_SOCKET`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tmux_socket: Option<String>,
-    /// UPnP / NAT-PMP / PCP port mapping on the local gateway (default on; off when
-    /// `JAUNT_HOME` is set, so tests never ask a real gateway for a mapping).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub portmapper: Option<bool>,
+    /// UPnP / NAT-PMP / PCP port mapping on the local gateway (`portmap = true`). Off by
+    /// default everywhere: it changes the owner's router. (`portmapper` is read as well.)
+    #[serde(skip_serializing_if = "Option::is_none", alias = "portmapper")]
+    pub portmap: Option<bool>,
     /// Fixed UDP port for the endpoint (default: any).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,

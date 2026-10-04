@@ -84,9 +84,34 @@ fn prompt_relay() -> Result<String> {
     Ok(line.trim().to_string())
 }
 
+/// The code, from the terminal or stdin (PAIR-2): never from argv unless given there, which
+/// the process list shows to every local user while the join runs.
+fn read_code() -> Result<String> {
+    let mut line = String::new();
+    if term::stdin_is_tty() {
+        print!("Code shown by 'jaunt link' on the other machine: ");
+        std::io::stdout().flush()?;
+    }
+    std::io::stdin().read_line(&mut line)?;
+    let line = line.trim().to_string();
+    if line.is_empty() {
+        bail!("no code given (type the code 'jaunt link' shows on the other machine)");
+    }
+    Ok(line)
+}
+
 pub async fn join(paths: &Paths, code_words: Vec<String>, relay: Option<String>, yes: bool) -> Result<i32> {
+    let typed = if code_words.is_empty() {
+        read_code()?
+    } else {
+        eprintln!(
+            "jaunt: warning: a code on the command line is visible to other users of this machine while the join runs; \
+             next time run 'jaunt join' and type the code when asked"
+        );
+        code_words.join(" ")
+    };
     // Check the code here first, so a typo never reaches (and burns) the other machine.
-    let code = Code::parse(&code_words.join(" "))?.to_string();
+    let code = Code::parse(&typed)?.to_string();
     let mut cfg = Config::load(paths)?;
     let running = ipc::connect_existing(paths).await.is_some();
     let daemon_relays = if running { crate::status(paths).await.map(|s| s.relays).unwrap_or_default() } else { Vec::new() };
@@ -97,7 +122,7 @@ pub async fn join(paths: &Paths, code_words: Vec<String>, relay: Option<String>,
     }
     if relays.is_empty() && daemon_relays.is_empty() {
         if !term::stdin_is_tty() {
-            bail!("this machine does not know a relay yet: jaunt join CODE --relay URL (or set JAUNT_RELAY)");
+            bail!("this machine does not know a relay yet: jaunt join --relay URL (or set JAUNT_RELAY)");
         }
         relays = vec![prompt_relay()?];
     }
@@ -135,8 +160,8 @@ fn names(v: &[proto::PeerRef]) -> String {
     v.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")
 }
 
-pub async fn unlink(paths: &Paths, target: String, cascade: bool) -> Result<i32> {
-    let r = revoke_conversation(paths, IpcRequest::Unlink { target, cascade }).await?;
+pub async fn unlink(paths: &Paths, target: String, cascade: bool, kill_sessions: bool) -> Result<i32> {
+    let r = revoke_conversation(paths, IpcRequest::Unlink { target, cascade, kill_sessions }).await?;
     let ids: Vec<String> = r.revoked.iter().map(|p| format!("{} ({})", p.name, p.id.short())).collect();
     println!("unlinked {}: refused here from now on, connections closed, {} process(es) it ran here ended", ids.join(", "), r.sessions_killed);
     if !r.confirmed.is_empty() {
@@ -156,7 +181,25 @@ pub async fn unlink(paths: &Paths, target: String, cascade: bool) -> Result<i32>
             names(&r.added_by_revoked)
         );
     }
+    if let Some(n) = r.tmux_sessions_killed {
+        println!("ended {n} tmux session(s) that {} had created", names(&r.revoked));
+    }
+    println!("{}", revocation_reminder(&names(&r.revoked), r.tmux_sessions_killed.is_some()));
     Ok(0)
+}
+
+/// H9: what revocation does not undo, said plainly (the machine may have been in hostile hands).
+fn revocation_reminder(who: &str, killed_sessions: bool) -> String {
+    let sessions = if killed_sessions {
+        "processes it started outside its own tmux sessions"
+    } else {
+        "tmux sessions it created and what runs in them (jaunt unlink --kill-sessions ends those)"
+    };
+    format!(
+        "note: revoking {who} stops it from connecting; it does not undo what it already did on the others: \
+         {sessions}, files it wrote or copied, cron jobs, keys or config it changed. If it may have been in \
+         someone else's hands, check the machines it could reach."
+    )
 }
 
 /// Tombstone this machine and tell the others; prints who confirmed.
@@ -192,6 +235,6 @@ pub async fn leave(paths: &Paths, yes: bool) -> Result<i32> {
         announce_leave(paths).await?;
     }
     crate::wipe_identity(paths).await?;
-    println!("this machine left the mesh; its key and roster are gone. To link it again: jaunt join CODE");
+    println!("this machine left the mesh; its key and roster are gone. To link it again: jaunt join");
     Ok(0)
 }

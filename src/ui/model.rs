@@ -415,7 +415,11 @@ impl Mesh {
                     }
                 }
             }
-            EventKind::Disconnected { reason } if reason.contains("not a member") && pid.is_some() => {
+            // The daemon now reports such a refusal once per streak as `dial_failed`, with
+            // no handshake before it; older daemons sent handshake + disconnected each time.
+            EventKind::Disconnected { reason } | EventKind::DialFailed { error: reason }
+                if reason.contains("not a member") && pid.is_some() =>
+            {
                 // The other side does not know this machine yet: a link being formed (the
                 // roster reaches it a moment later). Fold the false start into one quiet line.
                 let Some(id) = pid else { return };
@@ -647,6 +651,17 @@ mod tests {
         assert_eq!(m.log[0].verb, "link up");
         assert!(m.log[0].detail.iter().any(|(t, _)| t.contains("after 2 retries")));
         assert!(!m.log.iter().any(|l| l.tone == Tone::Bad));
+
+        // H8: what the daemon sends now: one quiet refusal, then the link once it synced.
+        let mut m = Mesh::default();
+        m.apply_status(&snap());
+        let refused_once = EventKind::DialFailed { error: "moss refuses this machine as not a member there (it may not know of it yet)".into() };
+        m.apply_event(&ev(1000, &moss, refused_once), 1000, false);
+        assert_eq!((m.log.len(), m.log[0].verb.as_str(), m.log[0].tone), (1, "settling", Tone::Quiet));
+        m.apply_event(&ev(3000, &moss, up(false)), 3000, false);
+        assert_eq!(m.log.len(), 1);
+        assert_eq!(m.log[0].verb, "link up");
+        assert!(m.log[0].detail.iter().any(|(t, _)| t.contains("after 1 retry")));
     }
 
     #[test]

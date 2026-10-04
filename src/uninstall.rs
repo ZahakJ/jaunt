@@ -19,15 +19,40 @@ fn bin_dir(paths: &Paths) -> Option<PathBuf> {
     Some(home.join(".local/bin"))
 }
 
-fn remove_dir(dir: &Path, removed: &mut Vec<String>) -> Result<()> {
-    match std::fs::remove_dir_all(dir) {
-        Ok(()) => {
-            removed.push(dir.display().to_string());
-            Ok(())
+/// What jaunt itself writes in each of its directories. Uninstall deletes these names and
+/// nothing else, then removes the directory only if that left it empty (L1): a directory
+/// that is not jaunt's alone (a `JAUNT_HOME` pointed at `$HOME`, say) keeps everything else.
+pub const CONFIG_FILES: &[&str] = &["config.toml", "jaunt.tmux"];
+pub const STATE_FILES: &[&str] = &[
+    "daemon.log", "daemon.log.1", "events.jsonl", "events.jsonl.1", "tmux-hint-shown", "addrs.json", "tmux-owners.json",
+];
+pub const RUNTIME_FILES: &[&str] = &["sock", "daemon.lock"];
+pub const DATA_FILES: &[&str] = &["key", "roster.json", "daemon.lock"];
+
+/// Remove `files` (and jaunt's own temp files) from `dir`, then `dir` itself if empty.
+fn remove_known(dir: &Path, files: &[&str], removed: &mut Vec<String>) -> Result<()> {
+    let Ok(rd) = std::fs::read_dir(dir) else { return Ok(()) };
+    for ent in rd.flatten() {
+        let name = ent.file_name().to_string_lossy().into_owned();
+        // write_private_atomic's temp files: ".<name>.tmp.<pid>" for one of ours.
+        let ours_tmp = name
+            .strip_prefix('.')
+            .and_then(|n| n.split_once(".tmp."))
+            .is_some_and(|(base, pid)| files.contains(&base) && pid.bytes().all(|b| b.is_ascii_digit()));
+        if !(files.contains(&name.as_str()) || ours_tmp) {
+            continue;
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e).with_context(|| format!("cannot remove {}", dir.display())),
+        let p = ent.path();
+        // Never follow or remove a directory under one of these names.
+        if std::fs::symlink_metadata(&p).map(|m| m.is_dir()).unwrap_or(true) {
+            continue;
+        }
+        remove_file(&p, removed)?;
     }
+    if std::fs::remove_dir(dir).is_ok() {
+        removed.push(dir.display().to_string());
+    }
+    Ok(())
 }
 
 fn remove_file(f: &Path, removed: &mut Vec<String>) -> Result<()> {
@@ -90,11 +115,26 @@ pub async fn run(paths: &Paths, delete_identity: Option<bool>) -> Result<i32> {
         None => false,
     };
 
-    remove_dir(&paths.config_dir, &mut removed)?;
-    remove_dir(&paths.state_dir, &mut removed)?;
-    remove_dir(&paths.runtime_dir, &mut removed)?;
+    // The unit's directory first (it may sit inside config_dir under JAUNT_HOME).
+    if paths.jaunt_home.is_some() {
+        let _ = std::fs::remove_dir(&paths.systemd_user_dir);
+        if let Some(p) = paths.systemd_user_dir.parent() {
+            let _ = std::fs::remove_dir(p);
+        }
+    }
+    remove_known(&paths.config_dir, CONFIG_FILES, &mut removed)?;
+    remove_known(&paths.runtime_dir, RUNTIME_FILES, &mut removed)?;
+    remove_known(&paths.state_dir, STATE_FILES, &mut removed)?;
     if delete_key {
-        remove_dir(&paths.data_dir, &mut removed)?;
+        remove_known(&paths.data_dir, DATA_FILES, &mut removed)?;
+    } else {
+        // Only the lock: key and roster stay.
+        remove_known(&paths.data_dir, &["daemon.lock"], &mut removed)?;
+    }
+    for (dir, what) in [(&paths.config_dir, "config"), (&paths.state_dir, "state"), (&paths.runtime_dir, "runtime")] {
+        if dir.exists() {
+            println!("left {} in place: it holds files that are not jaunt's ({what} directory)", dir.display());
+        }
     }
 
     // The binary last: only the one install.sh put in place, and only if it is this one.
@@ -122,6 +162,18 @@ pub async fn run(paths: &Paths, delete_identity: Option<bool>) -> Result<i32> {
         println!("kept the key and roster in {} (delete that directory to finish)", paths.data_dir.display());
     }
     println!("tmux sessions on this machine are left running; end them with tmux if you want");
+    // L10: what the owner installed as root stays until undone as root.
+    for (file, script) in [
+        ("/etc/polkit-1/rules.d/49-jaunt-host.rules", "host-polkit-rule.sh"),
+        ("/etc/systemd/logind.conf.d/50-jaunt-lid-on-ac.conf", "logind-lid-on-ac.sh"),
+    ] {
+        if Path::new(file).exists() {
+            println!(
+                "{file} is still installed (it was added as root from jaunt's scripts/root-extras); \
+                 undo it with: sudo sh scripts/root-extras/{script} undo   (or: sudo rm {file})"
+            );
+        }
+    }
     println!("if you sourced jaunt.tmux from your tmux config, remove that line");
     if peers.map_or(has_identity, |n| n > 0) {
         println!("on another machine in the mesh, revoke this one: jaunt unlink {name}");
@@ -136,5 +188,42 @@ pub fn check_flags(yes: bool, keep_key: bool) -> Result<Option<bool>> {
         (true, false) => Ok(Some(true)),
         (false, true) => Ok(Some(false)),
         (false, false) => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// L1: a JAUNT_HOME that is not jaunt's alone keeps everything that is not jaunt's.
+    #[test]
+    fn only_jaunts_own_files_go() {
+        let home = std::env::temp_dir().join(format!("jaunt-uninst-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let p = Paths::under(&home);
+        for (dir, f) in [(&p.config_dir, "config.toml"), (&p.state_dir, "events.jsonl"), (&p.state_dir, ".addrs.json.tmp.123"), (&p.runtime_dir, "sock")] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join(f), b"x").unwrap();
+        }
+        std::fs::create_dir_all(p.config_dir.join("someapp")).unwrap();
+        std::fs::write(p.config_dir.join("someapp/settings.ini"), b"keep").unwrap();
+        std::fs::write(p.state_dir.join("history"), b"keep").unwrap();
+        std::fs::create_dir_all(p.data_dir.join("photos")).unwrap();
+        std::fs::write(p.data_dir.join("photos/img.txt"), b"keep").unwrap();
+        std::fs::write(p.data_dir.join("key"), b"k").unwrap();
+        let mut removed = Vec::new();
+        remove_known(&p.config_dir, CONFIG_FILES, &mut removed).unwrap();
+        remove_known(&p.state_dir, STATE_FILES, &mut removed).unwrap();
+        remove_known(&p.runtime_dir, RUNTIME_FILES, &mut removed).unwrap();
+        remove_known(&p.data_dir, DATA_FILES, &mut removed).unwrap();
+        assert!(!p.config_dir.join("config.toml").exists());
+        assert!(!p.state_dir.join("events.jsonl").exists());
+        assert!(!p.state_dir.join(".addrs.json.tmp.123").exists());
+        assert!(!p.runtime_dir.exists(), "an empty jaunt directory goes");
+        assert!(!p.data_dir.join("key").exists());
+        assert_eq!(std::fs::read(p.config_dir.join("someapp/settings.ini")).unwrap(), b"keep");
+        assert_eq!(std::fs::read(p.state_dir.join("history")).unwrap(), b"keep");
+        assert_eq!(std::fs::read(p.data_dir.join("photos/img.txt")).unwrap(), b"keep");
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

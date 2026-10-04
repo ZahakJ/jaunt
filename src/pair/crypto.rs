@@ -1,7 +1,9 @@
 //! The cryptographic parts of pairing, all standard constructions (DESIGN §6):
 //! SPAKE2 (RustCrypto `spake2`, Ed25519 group, asymmetric roles), HKDF-SHA256 for the
 //! nameplate key and the two directional keys, ChaCha20-Poly1305 for the sealed messages,
-//! SHA-256 for the human check. Nothing here is new cryptography.
+//! SHA-256 for the human check, and each machine's own ed25519 key (the key it already
+//! has, the same signature scheme TLS uses for it) to prove it holds the id it claims.
+//! Nothing here is new cryptography.
 
 use anyhow::{Result, anyhow};
 use chacha20poly1305::aead::{Aead, KeyInit};
@@ -82,15 +84,46 @@ impl SessionKey {
         )
     }
 
-    /// The human check: SHA-256 over the key and both real ids (inviter first).
-    pub fn human_check(&self, inviter: &MachineId, joiner: &MachineId) -> HumanCheck {
+    /// The human check: SHA-256 over the SPAKE2 key alone. The key already covers the
+    /// whole SPAKE2 transcript; the ids are bound to it by the proofs below instead. A
+    /// field that one side may choose after the key is known (such as a claimed id) must
+    /// never be an input here, or a man in the middle who has the code could grind it at
+    /// hash speed until both screens show the same sigil.
+    pub fn human_check(&self) -> HumanCheck {
         let mut h = Sha256::new();
-        h.update(b"jaunt/pair/1/check");
+        h.update(b"jaunt/pair/2/check");
         h.update(self.0.as_ref());
-        h.update(inviter.0);
-        h.update(joiner.0);
         let d: [u8; 32] = h.finalize().into();
         HumanCheck::from_hash(&d)
+    }
+
+    /// What `role` signs with its machine key: a value derived from this session's key,
+    /// so the signature proves "the holder of this id is in this very pairing session".
+    fn proof_message(&self, role: PairRole) -> Zeroizing<Vec<u8>> {
+        let label: &[u8] = match role {
+            PairRole::Inviter => b"jaunt/pair/2/proof/inviter",
+            PairRole::Joiner => b"jaunt/pair/2/proof/joiner",
+        };
+        let binding = self.direction_key(b"jaunt/pair/2/proof");
+        let mut m = Zeroizing::new(label.to_vec());
+        m.extend_from_slice(binding.as_ref());
+        m
+    }
+
+    /// Sign this session with the machine's key (hex, 64 bytes).
+    pub fn prove(&self, role: PairRole, machine_key: &iroh::SecretKey) -> String {
+        data_encoding::HEXLOWER.encode(&machine_key.sign(&self.proof_message(role)).to_bytes())
+    }
+
+    /// Check that `id` is a real ed25519 key and that its holder signed this session as `role`.
+    pub fn check_proof(&self, role: PairRole, id: &MachineId, proof: &str) -> Result<()> {
+        let key = id.to_endpoint()?;
+        let raw = data_encoding::HEXLOWER_PERMISSIVE
+            .decode(proof.as_bytes())
+            .map_err(|_| anyhow!("the other machine's proof of its key is malformed"))?;
+        let sig = iroh::Signature::try_from(raw.as_slice()).map_err(|_| anyhow!("the other machine's proof of its key is malformed"))?;
+        key.verify(&self.proof_message(role), &sig)
+            .map_err(|_| anyhow!("the other machine did not prove that it holds the key {} it claims", id.short()))
     }
 }
 
@@ -176,9 +209,27 @@ mod tests {
         assert_eq!(oj.open(&ct).unwrap(), b"hello");
         let ct = sj.seal(b"back").unwrap();
         assert_eq!(oi.open(&ct).unwrap(), b"back");
-        let (a, b) = (MachineId([1; 32]), MachineId([2; 32]));
-        assert_eq!(ki.human_check(&a, &b), kj.human_check(&a, &b));
-        assert_ne!(ki.human_check(&a, &b), ki.human_check(&b, &a));
+        assert_eq!(ki.human_check(), kj.human_check());
+        assert_ne!(ki.human_check(), SessionKey::from_bytes([3; 32]).human_check());
+    }
+
+    #[test]
+    fn proofs_bind_key_role_and_session() {
+        let k = SessionKey::from_bytes([5; 32]);
+        let other = SessionKey::from_bytes([6; 32]);
+        let sk = iroh::SecretKey::from_bytes(&[42; 32]);
+        let id = MachineId::from_endpoint(&sk.public());
+        let p = k.prove(PairRole::Joiner, &sk);
+        assert!(k.check_proof(PairRole::Joiner, &id, &p).is_ok());
+        assert!(k.check_proof(PairRole::Inviter, &id, &p).is_err(), "a joiner proof is not an inviter proof");
+        assert!(other.check_proof(PairRole::Joiner, &id, &p).is_err(), "a proof from another session does not count");
+        let someone = MachineId::from_endpoint(&iroh::SecretKey::from_bytes(&[43; 32]).public());
+        assert!(k.check_proof(PairRole::Joiner, &someone, &p).is_err(), "nobody can claim a key they do not hold");
+        let not_a_point = MachineId([2; 32]);
+        if not_a_point.to_endpoint().is_err() {
+            assert!(k.check_proof(PairRole::Joiner, &not_a_point, &p).is_err());
+        }
+        assert!(k.check_proof(PairRole::Joiner, &id, "zz").is_err());
     }
 
     #[test]
@@ -232,7 +283,7 @@ mod tests {
     #[test]
     fn sigil_is_symmetric() {
         let k = SessionKey::from_bytes([9; 32]);
-        let h = k.human_check(&MachineId([1; 32]), &MachineId([2; 32]));
+        let h = k.human_check();
         assert_eq!(h.sigil.len(), 5);
         for row in &h.sigil {
             let r: Vec<char> = row.chars().collect();
