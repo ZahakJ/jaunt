@@ -18,7 +18,7 @@ Once the repository is public:
 curl -fsSL https://raw.githubusercontent.com/ZahakJ/jaunt/main/install.sh | sh -s -- --relay https://relay.example.net --name forge
 ```
 
-Neither line has been run yet: the GitHub repository and a release do not exist at the time of writing. What has been run is the same installer on the release file: `sh install.sh --from-file dist/jaunt-x86_64-linux-musl --relay URL --name forge`. The installer checks the binary against the `.sha256` that comes with it, which catches a broken download but not a tampered release.
+The first line was run against the private repository and its v0.1.0 release, in a throwaway home directory; the `curl` line cannot work until the repository is public. The installer checks the binary against the `.sha256` that comes with it, which catches a broken download but not a tampered release.
 
 **Keep your Cloudflare tunnel.** jaunt is new code with no outside review and no real-world use yet. Leave the existing SSH-through-Cloudflare path in place as the way in until jaunt has proven itself on your machines for a while (see [Security](#security)).
 
@@ -386,7 +386,7 @@ The throughput rows are from one computer with no bandwidth limit, so they show 
 | real networks: two homes, a phone hotspot, CGNAT, hotel Wi-Fi with captive portals | |
 | IPv6 (the lab is IPv4 only) | |
 | `jaunt up` with the real systemd user manager, and its watchdog | tests ran the daemon directly so they never touched the real user services |
-| the GitHub install lines, `--up`, the root extras, the one-LAN test relay | |
+| the public `curl` install line, `--up`, the root extras, the one-LAN test relay | |
 | two relays in one mesh | |
 
 ---
@@ -449,7 +449,7 @@ If a thief revoked your other machines first: run `jaunt reset` on each of yours
 ### Yours to make
 
 - **Where to host the relay.** A small VPS is recommended ([`deploy/relay/README.md`](deploy/relay/README.md)). Fly.io does not work for this as shipped. The desktop behind the Cloudflare tunnel works only as a relay of last resort (no direct paths through it).
-- **Making the repository public.** Before that: `install.sh` names the GitHub account `ZahakJ/jaunt` as the download location, and one older commit still contains your home directory path (the current files do not). Rewriting history to remove it is your call.
+- **Making the repository public.** It is private at `github.com/ZahakJ/jaunt`. The published history contains no path, hostname or address of your machines (one early commit did; it was rewritten before the first push).
 - **When to retire the Cloudflare path.** Not before the real-world test above has passed and jaunt has been used for a while.
 - Whether the remaining gaps matter enough to fix: the revocation window when no informed machine is reachable, the slow roam after an outage, signed releases.
 
@@ -471,7 +471,7 @@ cargo test                            # unit tests
 scripts/build-release.sh              # the static musl release binary, built inside a throwaway Docker container
 ```
 
-`cargo test` (132 passed) and `scripts/build-release.sh` were run on this commit by the verification pass; I did not rebuild for this README. Other platforms build from source; only x86_64 Linux has a release binary.
+`cargo test` (133 passed) and `scripts/build-release.sh` were run on the final commit. Other platforms build from source; only x86_64 Linux has a release binary.
 
 The lab: `test/harness/README.md` (Docker, no root), then `test/e2e/run-all.sh`.
 
