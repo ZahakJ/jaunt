@@ -28,13 +28,13 @@ The guard checks every 5 seconds:
 | a CPU sensor at ≥ 90 °C for 120 s, or any sensor within 5 °C of its critical point | the lock is released, and it **stays released until the lid is opened** |
 | power or temperature cannot be read, a sensor read hangs for 2 s, or the CPU sensors that were there stop answering | the lock is not held: unknown means "sleep" |
 | released because of the power (battery, weak charger) | taken again only once mains has been steady for a while (20 s to 2 min, depending on how long it was off) |
+| released while the lid is closed (and no dock or second display) | logind normally suspends at once; if the machine is still awake 5 s later, jaunt runs `systemctl suspend` itself, and again a minute later if needed |
+| the daemon crashes, is killed, or hangs | the lock is gone (see below), so logind suspends a closed laptop |
 
 The durations are counted the way a leaky bucket fills: time in the condition adds up,
 time out of it pays back at half speed. A temperature that dips below 90 °C for one
 sample every two minutes therefore still trips, and a loose cable that flaps between
 battery and mains releases the lock instead of keeping it while mostly on battery.
-| released while the lid is closed (and no dock or second display) | logind normally suspends at once; if the machine is still awake 5 s later, jaunt runs `systemctl suspend` itself, and again a minute later if needed |
-| the daemon crashes, is killed, or hangs | the lock is gone (see below), so logind suspends a closed laptop |
 
 How the lock dies with the daemon: the lock is held by a `systemd-inhibit` child that
 waits on a pipe from the daemon. If the daemon exits in any way, the pipe closes and the

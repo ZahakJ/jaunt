@@ -3,7 +3,7 @@ name = "jaunt"
 version = "0.1.0"
 edition = "2024"
 description = "Hop between your own machines over direct, end-to-end encrypted peer-to-peer links"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 publish = false
 
 [[bin]]

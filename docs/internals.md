@@ -30,6 +30,12 @@ port; without it the daemon re-binds the port it used last time when that is fre
 Relays in effect: the roster's fleet settings once anyone ran `jaunt relay set`, else the
 config's. Fleet relay changes are applied live (`Endpoint::insert_relay/remove_relay`); a
 new `relay_ca` needs a daemon restart.
+**Known bug:** a daemon that started with no relay at all and then gets one through
+`jaunt relay set` does not connect to it (`jaunt check`: "not connected to any relay",
+`relay_connected` stays false) until it is restarted. Reproduced in a sandbox on the host
+with a local test relay; a daemon that starts with a relay in its config, or one
+started by `jaunt relay set` itself, is fine. `jaunt join` already restarts the daemon in
+this case.
 
 ## Wire (`src/proto.rs`)
 
@@ -183,7 +189,7 @@ way to see the stream.
   peer is back in about a second instead of after the 30 s idle timeout.
 - SIGTERM/SIGINT/SIGHUP or `shutdown`: close every connection with a reason, close the
   endpoint (3 s cap). sd_notify READY/WATCHDOG/STOPPING when run by systemd.
-- Single instance per home: `flock` on `run/daemon.lock`.
+- Single instance per identity: `flock` on `data/daemon.lock` (next to the key; see Files).
 
 ## Roster (`src/roster.rs`)
 
@@ -242,7 +248,9 @@ config and restarts the daemon. No LAN pairing without a relay: stage 1 has no m
 On every roster change, in this order: the handshake allowlist is replaced (a revoked id is
 refused by the hook and by every stream open from then on); every process started for a
 non-member (shell pty clients, exec commands; `children.rs` registry) gets SIGHUP to its
-process group, SIGKILL after 1 s if still registered; connections to non-members are
+process group, SIGKILL after 1 s if still registered (the serving future is kept alive up to
+3 s after the revocation, `REVOKED_GRACE`, so that SIGKILL still reaches a command that ignores
+SIGHUP); connections to non-members are
 closed; a `revoked` event is emitted per new tombstone; the change is pushed to members only.
 tmux sessions themselves are kept (they are the owner's; a revoked machine's shell client is
 detached). `unlink` applies the tombstone(s) locally first, then syncs with every other
@@ -260,12 +268,19 @@ receiver.
 **Window for a machine that was away during an unlink.** A machine back from an absence
 serves no shell, command, port or copy until it has tried to sync with every other member
 (settling, above), so as long as any informed member is reachable the revoked machine
-cannot get in first: `03-unlink.sh` freezes b for 45 s while a unlinks c, then has c run a
+cannot get in first: `03-unlink.sh` freezes b for 60 s while a unlinks c, then has c run a
 command on b five times the moment b thaws; none gets through. **What is left:** if no
 informed member is reachable within the 5 s settling bound (the others offline, or the
 relay down and no direct path), the machine serves the revoked one until it next syncs
 with an informed member (every 30 s it retries, and on every reconnect). The same holds
 for a machine that never left: it learns of a revocation by the push, or by its next sync.
+**Not covered: a network-only outage.** If a member's daemon keeps running while its network
+is gone (no freeze, no suspend), its settling rounds run while it is still cut off: they
+reach nobody but count as done, and a waiting request is served once the wait is over. When
+the network returns it serves the revoked machine until its next sync with an informed
+member. The verifier reproduced this in the harness (a script outside the repository: b blackholed 90 s,
+c's five commands sent the moment b's network returns: 0 of 5 through in one round, 5 of
+5 in the other). A fix needs a decision on how settling should retry.
 
 ## `jaunt check` (`src/check.rs`)
 
@@ -309,7 +324,10 @@ The daemon is never started by `check`.
   (`JAUNT_ASCII=1` or a non-UTF-8 locale → ASCII). `model.rs` turns a `StatusSnapshot` plus
   the event stream into what is drawn; `mesh.rs` draws the tree (this machine as hub, a
   link per peer styled by path, latency and sparkline, the peer column with host state and
-  sessions); `view.rs`/`live.rs` are the live view (bare `jaunt` on a terminal, and the
+  sessions); a relayed link is drawn through a visible relay waypoint, all sparklines share one
+  latency scale, repeated events fold into one line (`in step ×6`), and the live view has a
+  detail panel for the selected machine (path, last minute of latency, last path change,
+  handshake, uptime, id); `view.rs`/`live.rs` are the live view (bare `jaunt` on a terminal, and the
   hidden `jaunt pick` for the tmux popup: Enter opens the hop in a new tmux window);
   `ls.rs` is `jaunt ls` on a terminal; `ritual.rs` is what `jaunt link`/`join` show on a
   terminal (off a terminal they print the plain lines `02-link.sh` parses); `demo.rs` is
@@ -326,7 +344,7 @@ The daemon is never started by `check`.
 - `scripts/build-release.sh`: static x86_64 musl binary built in a throwaway `debian:12`
   container with rustup (toolchain pinned, default 1.97.1); caches under
   `target/musl-build/` (about 1.8 GB); output `dist/jaunt-x86_64-linux-musl` and `.sha256`.
-  First build 3 min with `-j 4`; static-pie, 10.5 MB (10 466 824 bytes) with rustc 1.97.1.
+  First build 3 min with `-j 4`; static-pie, 10.7 MB (10 700 584 bytes at commit 1252769) with rustc 1.97.1.
   The whole e2e suite passes with it (the harness installs a binary under its file name, so
   copy it to a file called `jaunt` first).
 - `install.sh` (POSIX sh, no root): downloads the release asset and its `.sha256` from
