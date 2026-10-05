@@ -94,8 +94,9 @@ async fn unlink(
     kill_sessions: bool,
     tx: &tokio::sync::mpsc::UnboundedSender<IpcResponse>,
 ) -> Result<UnlinkReport> {
-    let id = d.resolve(target)?;
+    let id = d.resolve_unlink(target, cascade || kill_sessions)?;
     let roster = d.roster_snapshot();
+    let already: Vec<MachineId> = roster.tombstones.contains_key(&id).then_some(id).into_iter().collect();
     let added: BTreeSet<MachineId> = roster.added_by_closure(&id).into_iter().filter(|x| *x != d.me).collect();
     let mut victims: BTreeSet<MachineId> = [id].into();
     if cascade {
@@ -150,6 +151,7 @@ async fn unlink(
         added_by_revoked: if cascade { Vec::new() } else { refs(d, &after, added) },
         sessions_killed: sessions_killed as u32,
         tmux_sessions_killed,
+        already_revoked: refs(d, &after, already),
     })
 }
 
@@ -173,5 +175,6 @@ async fn leave(d: &Arc<Daemon>, tx: &tokio::sync::mpsc::UnboundedSender<IpcRespo
         added_by_revoked: Vec::new(),
         sessions_killed,
         tmux_sessions_killed: None,
+        already_revoked: Vec::new(),
     })
 }

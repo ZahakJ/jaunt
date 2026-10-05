@@ -111,7 +111,10 @@ pub fn parse_relays(list: &[String]) -> Result<Vec<RelayUrl>> {
 
 /// Builder settings shared by the machine endpoint and the pairing endpoints.
 fn base_builder(relays: &[RelayUrl], relay_ca: Option<&Path>, portmapper: bool) -> Result<iroh::endpoint::Builder> {
-    let relay_mode = if relays.is_empty() { RelayMode::Disabled } else { RelayMode::custom(relays.iter().cloned()) };
+    // Never `RelayMode::Disabled`, even with no relay: that leaves the endpoint without a
+    // relay transport, and a relay added later (`jaunt relay set`, or a relay list that
+    // arrives by roster sync) would never be used. An empty custom map contacts nobody.
+    let relay_mode = RelayMode::custom(relays.iter().cloned());
     let transport = QuicTransportConfig::builder()
         .keep_alive_interval(KEEP_ALIVE)
         .max_idle_timeout(Some(IDLE_TIMEOUT.try_into()?))

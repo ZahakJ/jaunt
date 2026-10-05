@@ -28,14 +28,13 @@ port; without it the daemon re-binds the port it used last time when that is fre
 `JAUNT_RELAY` (comma list) is used when the config has no relays.
 
 Relays in effect: the roster's fleet settings once anyone ran `jaunt relay set`, else the
-config's. Fleet relay changes are applied live (`Endpoint::insert_relay/remove_relay`); a
-new `relay_ca` needs a daemon restart.
-**Known bug:** a daemon that started with no relay at all and then gets one through
-`jaunt relay set` does not connect to it (`jaunt check`: "not connected to any relay",
-`relay_connected` stays false) until it is restarted. Reproduced in a sandbox on the host
-with a local test relay; a daemon that starts with a relay in its config, or one
-started by `jaunt relay set` itself, is fine. `jaunt join` already restarts the daemon in
-this case.
+config's. Fleet relay changes (`jaunt relay set`, or a list that arrives by roster sync)
+are applied live (`Endpoint::insert_relay/remove_relay`); a new `relay_ca` needs a daemon
+restart. The endpoint is always built with a relay transport (`RelayMode::custom` with the
+list, empty if there is none, never `RelayMode::Disabled`), so a daemon that started with
+no relay connects as soon as one is set; `jaunt relay set` waits up to 10 s and says
+whether the daemon is connected to the relay. (Before, such a daemon stayed "not connected
+to any relay" until restarted; `00-host.sh` covers it.)
 
 ## Wire (`src/proto.rs`)
 
@@ -95,6 +94,12 @@ request per connection. Requests (`IpcRequest`, tagged by `op`):
 
 `target` is resolved by the daemon: exact display name, then unambiguous name prefix, then
 id-hex prefix (≥ 4 chars); this machine is never a target. Errors say "could mean x or y".
+For `unlink` with `cascade` or `kill_sessions`, a target that matches no member is looked
+up among revoked machines the same way (their entries, with the name, stay in the roster;
+a tombstone without an entry is found by id prefix; same-named revoked machines are told
+apart by id), so `jaunt unlink fern --cascade` still works after fern was unlinked; the
+report then lists it in `already_revoked`. Without those flags it says the machine is
+already unlinked.
 
 `StatusSnapshot`:
 ```
@@ -171,13 +176,22 @@ way to see the stream.
 - Every adopted connection is tracked per peer until it closes; a revocation closes all of
   them. A new connection from a peer replaces (and closes) any older one except inside the
   simultaneous-dial race below.
-- **Settling (H1).** After an absence (daemon start; the 1 s monitor not having run for 5 s,
-  i.e. a freeze or suspend; or no authenticated contact with any member for 60 s, where
-  contact is a sync either way or a ping answered or served) the daemon serves Sync and
-  Ping only until it has tried to sync with every other member: all attempts finished
-  (each retried with a fresh dial while time is left) or 5 s passed. Then it re-checks the
-  requester's membership, so a machine that was revoked while this one was away is refused
-  as soon as any informed member is reachable. Requests wait (up to 8 s) rather than fail.
+- **Settling (H1).** An absence is a daemon start, the 1 s monitor not having run for 5 s
+  (a freeze or suspend), or no authenticated contact with any member for 60 s (contact is a
+  sync either way or a ping answered or served). From then on the daemon is *unsettled*.
+  It serves Sync and Ping always; it serves a peer's Shell, Exec, Tcp, Copy or
+  KillSessions only once a Sync (either direction, a settling round's or any other) has
+  completed since the absence with a member other than that peer, or when no member other
+  than that peer exists (nobody else could know of its revocation). It is settled again
+  once that holds for every member (synced with two members, or with the only one). A
+  round that reached nobody settles nothing, and no timer settles it. While unsettled each
+  such request waits for a settling round that started at most 2 s before it (joining the
+  running one, else starting one), then re-checks the requester's membership and is served.
+  A round syncs with every other member at once for at most 5 s, dialling through the relay
+  and the remembered direct addresses (a connection from before that does not answer in
+  2.5 s is closed and dialled again). While unsettled the monitor also starts a round every
+  30 s. The cost: while unsettled, a request whose answer has to come from an unreachable
+  member waits up to 5 s.
 - Every served stream (shell, exec, tcp, copy) ends when its peer stops being a member,
   besides the process kills below.
 - Every adopted connection (either direction) accepts streams, samples the selected path
@@ -241,7 +255,7 @@ with no argument); a code given on the command line works but warns that the pro
 shows it. `join` refuses on a machine that already has other members (use `leave` first). If the
 fleet relay list was never set, `link` sets it from the inviter's relays so the joiner
 receives it. A `join` on a machine whose daemon runs without a relay saves the relay to
-config and restarts the daemon. No LAN pairing without a relay: stage 1 has no mDNS.
+config; the running daemon takes the fleet relay list from the roster it receives. No LAN pairing without a relay: stage 1 has no mDNS.
 
 ## Revocation (`src/trust.rs`, `src/children.rs`, `Daemon::roster_changed`)
 
@@ -266,21 +280,18 @@ nobody. Accepted by design (flat trust): any member may tombstone any other, inc
 receiver.
 
 **Window for a machine that was away during an unlink.** A machine back from an absence
-serves no shell, command, port or copy until it has tried to sync with every other member
-(settling, above), so as long as any informed member is reachable the revoked machine
-cannot get in first: `03-unlink.sh` freezes b for 60 s while a unlinks c, then has c run a
-command on b five times the moment b thaws; none gets through. **What is left:** if no
-informed member is reachable within the 5 s settling bound (the others offline, or the
-relay down and no direct path), the machine serves the revoked one until it next syncs
-with an informed member (every 30 s it retries, and on every reconnect). The same holds
-for a machine that never left: it learns of a revocation by the push, or by its next sync.
-**Not covered: a network-only outage.** If a member's daemon keeps running while its network
-is gone (no freeze, no suspend), its settling rounds run while it is still cut off: they
-reach nobody but count as done, and a waiting request is served once the wait is over. When
-the network returns it serves the revoked machine until its next sync with an informed
-member. The verifier reproduced this in the harness (a script outside the repository: b blackholed 90 s,
-c's five commands sent the moment b's network returns: 0 of 5 through in one round, 5 of
-5 in the other). A fix needs a decision on how settling should retry.
+serves a peer no shell, command, port or copy until it has synced with some other member
+(settling, above), whether the absence was a freeze, a suspend, a restart or a network-only
+outage with the daemon running. **What is left, exactly:** a request from the revoked
+machine is served when no member other than it was reachable within 5 s of the request
+(the others offline, or the relay down and no direct path to them), or when the member it
+synced with had not heard either. It is then served until this machine syncs with an
+informed member (rounds every 30 s while unsettled, keepers every 30 s, and every
+reconnect). Absences shorter than a minute without a freeze are not noticed. A machine that
+never left learns of a revocation by the push or by its next sync. `03-unlink.sh` checks
+the freeze case (b frozen 60 s) once and the network-only case (b blackholed 90 s, daemon
+running) three times: each time c sends five commands to b the moment b is back, and none
+gets through.
 
 ## `jaunt check` (`src/check.rs`)
 
@@ -344,7 +355,7 @@ The daemon is never started by `check`.
 - `scripts/build-release.sh`: static x86_64 musl binary built in a throwaway `debian:12`
   container with rustup (toolchain pinned, default 1.97.1); caches under
   `target/musl-build/` (about 1.8 GB); output `dist/jaunt-x86_64-linux-musl` and `.sha256`.
-  First build 3 min with `-j 4`; static-pie, 10.7 MB (10 700 584 bytes at commit 1252769) with rustc 1.97.1.
+  First build 3 min with `-j 4`; static-pie, 10.7 MB (10 712 872 bytes with settling v2 and the relay fix) with rustc 1.97.1.
   The whole e2e suite passes with it (the harness installs a binary under its file name, so
   copy it to a file called `jaunt` first).
 - `install.sh` (POSIX sh, no root): downloads the release asset and its `.sha256` from
@@ -375,10 +386,14 @@ The daemon is never started by `check`.
   singly; host mode: heat dipping for one sample still trips, a flapping cable and an
   alternating weak charger release, a hung sensor read (a FIFO) releases, lost CPU
   sensors are unknown heat; local: uninstall removes only jaunt's files, the daemon's
-  PATH and environment, systemd unit quoting, settling's absence rule, address hints.
-- `test/e2e/00-host.sh`: two daemons on the host (JAUNT_HOME under `target/tmp`, dev relay
-  on 127.0.0.1, tmux `-L jaunt-test`), run, events, and a pty hop that survives SIGTERM and
-  SIGKILL restarts of the remote daemon.
+  PATH and environment, systemd unit quoting, settling (what starts an absence, that only a
+  sync with a member other than the requester ends it, that rounds reaching nobody and time
+  alone do not), revoked machines resolving for `unlink --cascade`, address hints.
+- `test/e2e/00-host.sh`: two daemons on the host (JAUNT_HOME under `target/tmp`, or
+  `HOST_E2E_DIR`; dev relay on 127.0.0.1, tmux `-L jaunt-test`), run, events, and a pty hop
+  that survives SIGTERM and SIGKILL restarts of the remote daemon; then a daemon started
+  with no relay gets one by `jaunt relay set`, reaches it without a restart (same pid) and
+  links a fourth machine.
 - `test/e2e/02-link.sh`: harness: a starts the mesh, b joins (code typed with spaces and
   capitals), identical sigils, wrong code fails and burns, c joins through b, a learns of c,
   all connected, pairing events present and free of the code words.
@@ -387,6 +402,9 @@ The daemon is never started by `check`.
   frozen for 60 s, `a unlink c --kill-sessions` ends the session c created on a and prints
   the reminder; the moment b thaws c sends five commands to b and none gets through
   (with the build before settling, all five did); b learns of the unlink (time printed).
+  Then three rounds of the network-only case: c linked again, b blackholed 90 s with its
+  daemon running while a unlinks c, c sends five commands the moment b's network is back,
+  none may get through; finally `unlink <id prefix of a revoked c> --cascade` works.
 - `test/e2e/06-paths.sh` also asserts that a daemon restarted while the relay is down is
   reached again on the direct path (address hints), and `05-continuity.sh`'s driver
   reports for each disruption whether the stall line was shown.

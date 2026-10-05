@@ -6,7 +6,8 @@
 # --kill-sessions (c's session on a ends; the reminder about what revocation does not undo
 # is printed). The moment b thaws, c tries to run a command on b five times: none may get
 # through (b settles with a before serving anyone after an absence). b learns of it; the
-# time that takes is printed.
+# time that takes is printed. Phase 3 does the same three times with b's network cut for
+# 90 s while its daemon keeps running (no freeze to notice).
 #   JAUNT_BIN=target/release/jaunt test/e2e/03-unlink.sh       (KEEP_HARNESS=1 leaves it up)
 set -uo pipefail
 E2E_NAME=03-unlink
@@ -138,6 +139,49 @@ note "b learned $((SECONDS - t0)) s after thawing"
 echo "$((SECONDS - t0))" > "$OUT-window-s"
 check "c is refused by b afterwards" c_refused_by b
 check "c is refused by a" c_refused_by a
+
+# Phase 3, a network-only outage (found in verification): b's daemon keeps running while
+# its network is gone for 90 s, so no freeze or suspend is noticed; its settling rounds
+# during the outage reach nobody. a unlinks c meanwhile. The moment b's network returns, c
+# sends five commands to b: none may get through (b stays unsettled until it has synced
+# with a member other than c). Three rounds, each with a newly linked c.
+for round in 1 2 3; do
+  note "phase 3, round $round: c linked again; b's network cut for 90 s while a unlinks c"
+  check "round $round: c fresh (new key)" h_fresh c
+  check "round $round: link a <- c" h_link a c
+  check "round $round: a, b, c all connected" wait_until 120 all_connected
+  "$HARNESS/jh" drop b 90 > "$OUT-drop-$round.log" 2>&1 &
+  DROP=$!
+  sleep 3
+  h_jaunt a unlink c > "$OUT-unlink-drop-$round.out" 2>&1
+  check "round $round: a: jaunt unlink c succeeds while b is cut off" [ $? = 0 ]
+  check "round $round: a: b has not heard yet" grep -q "not heard yet: b" "$OUT-unlink-drop-$round.out"
+  wait "$DROP"
+  t0=$SECONDS
+  HAMMER=()
+  for i in 1 2 3 4 5; do
+    h_jaunt c run b -- echo "GOT-IN-$i" > "$OUT-drop-$round-hammer-$i.out" 2>&1 &
+    HAMMER+=($!)
+  done
+  for p in "${HAMMER[@]}"; do wait "$p"; done
+  got_in=0
+  for i in 1 2 3 4 5; do
+    if grep -q "^GOT-IN-$i\$" "$OUT-drop-$round-hammer-$i.out"; then got_in=$((got_in + 1)); fi
+    sed "s/^/    c[$i]| /" "$OUT-drop-$round-hammer-$i.out" | head -2
+  done
+  check "round $round: c never got a command through to b after its network returned ($got_in of 5 did)" [ "$got_in" = 0 ]
+  check "round $round: b learns of the revocation" wait_until 120 h_not_knows b c
+  [ "$round" = 3 ] && C_ID=$(h_jaunt a ls --json | python3 -c "import json,sys; s=json.load(sys.stdin); print(max(s['revoked'], key=lambda r: r['revoked_at_ms'])['id'])")
+  note "round $round: b learned $((SECONDS - t0)) s after its network returned"
+  check "round $round: c is refused by b afterwards" c_refused_by b
+done
+# An already revoked machine can still be named for --cascade (several revoked machines are
+# called c by now, so by the start of its id).
+h_jaunt a unlink "${C_ID:0:8}" --cascade > "$OUT-cascade-revoked.out" 2>&1
+check "a: unlink <id of a revoked c> --cascade works" [ $? = 0 ]
+sed 's/^/    a| /' "$OUT-cascade-revoked.out" | head -3
+check "a: it says c had been unlinked before" grep -q "had been unlinked before" "$OUT-cascade-revoked.out"
+h_save_logs
 for m in a b; do note "jaunt ls on $m"; h_jaunt "$m" ls | cut -f1-5 | sed 's/^/    /'; done
 
 finish

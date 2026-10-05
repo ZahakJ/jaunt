@@ -401,9 +401,28 @@ async fn relay(paths: &Paths, action: Option<RelayCmd>) -> Result<i32> {
             };
             let was_running = ipc::connect_existing(paths).await.is_some();
             cfg.save(paths)?;
-            println!("{}", ipc::call_ok(paths, &IpcRequest::SetRelays { relays: urls }).await?);
+            println!("{}", ipc::call_ok(paths, &IpcRequest::SetRelays { relays: urls.clone() }).await?);
             if ca_changed && was_running {
                 println!("the relay CA applies after the daemon restarts (jaunt down; any jaunt command starts it again)");
+                return Ok(0);
+            }
+            if urls.is_empty() {
+                return Ok(0);
+            }
+            // The running daemon switches to the new list at once (no restart): say whether
+            // it got through.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let s = status(paths).await?;
+                if s.relay_connected {
+                    println!("the daemon is connected to the relay now (no restart needed)");
+                    break;
+                }
+                if std::time::Instant::now() > deadline {
+                    println!("the daemon is using the new relay list but is not connected to the relay yet; jaunt check says why");
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
             Ok(0)
         }

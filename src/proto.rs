@@ -475,6 +475,10 @@ pub struct UnlinkReport {
     /// the members that confirmed; `None` when not asked for.
     #[serde(default)]
     pub tmux_sessions_killed: Option<u32>,
+    /// Of `revoked`, the machine that was revoked before this request (`unlink <name>
+    /// --cascade` or `--kill-sessions` after `<name>` was unlinked).
+    #[serde(default)]
+    pub already_revoked: Vec<PeerRef>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

@@ -454,6 +454,43 @@ impl Roster {
         }
         hits.into_iter().next().map(|id| Resolve::Found(*id)).unwrap_or(Resolve::NotFound)
     }
+
+    /// How a revoked machine is shown: its last name (the entries of revoked machines are
+    /// kept) and the start of its id, or the id alone for a tombstone without an entry.
+    pub fn revoked_label(&self, id: &MachineId) -> String {
+        match self.entries.get(id) {
+            Some(e) => format!("{} ({})", e.name, id.short()),
+            None => id.short(),
+        }
+    }
+
+    /// Find a revoked machine (one with a tombstone) by exact name, unambiguous name
+    /// prefix, or id prefix (>= 4 hex chars). Several revoked machines can share a name
+    /// (a machine linked again with a new key keeps its name): then it is ambiguous and the
+    /// labels carry the ids. `exclude` (this machine) is never matched.
+    pub fn resolve_revoked(&self, query: &str, exclude: Option<&MachineId>) -> Resolve {
+        let ids: Vec<&MachineId> = self.tombstones.keys().filter(|id| Some(*id) != exclude).collect();
+        let name_of = |id: &MachineId| self.entries.get(id).map(|e| e.name.as_str());
+        let pick = |hits: Vec<&MachineId>| match hits.len() {
+            0 => Resolve::NotFound,
+            1 => Resolve::Found(*hits[0]),
+            _ => Resolve::Ambiguous(hits.iter().map(|id| self.revoked_label(id)).collect()),
+        };
+        let exact: Vec<&MachineId> = ids.iter().copied().filter(|id| name_of(id) == Some(query)).collect();
+        if !exact.is_empty() {
+            return pick(exact);
+        }
+        let prefix: Vec<&MachineId> =
+            ids.iter().copied().filter(|id| name_of(id).is_some_and(|n| n.starts_with(query))).collect();
+        if !prefix.is_empty() {
+            return pick(prefix);
+        }
+        if query.len() >= 4 && query.bytes().all(|b| b.is_ascii_hexdigit()) {
+            let q = query.to_ascii_lowercase();
+            return pick(ids.into_iter().filter(|id| id.to_string().starts_with(&q)).collect());
+        }
+        Resolve::NotFound
+    }
 }
 
 #[cfg(test)]
@@ -851,6 +888,40 @@ mod tests {
         let got: Vec<MachineId> = r.added_by_closure(&id(2)).into_iter().collect();
         assert_eq!(got, vec![id(3), id(4)], "c added by b, d added by c; f is already revoked");
         assert!(r.added_by_closure(&id(4)).is_empty());
+    }
+
+    /// `unlink <name> --cascade` after `<name>` was revoked: revoked machines resolve by
+    /// name (their entries are kept), by prefix, or by id prefix, and what they added is
+    /// still found.
+    #[test]
+    fn revoked_machines_resolve_for_a_later_cascade() {
+        // b (revoked) added c and d; an older c (id 7) was revoked too; id 8 is a tombstone
+        // that came without an entry.
+        let r = roster(
+            &[entry(1, "a", 1, 1), entry(2, "bravo", 2, 1), entry(3, "c", 3, 2), entry(4, "d", 4, 3), entry(7, "c", 1, 1)],
+            &[(2, 9, 1), (7, 5, 1), (8, 6, 1)],
+        );
+        assert_eq!(r.resolve("bravo", Some(&id(1))), Resolve::NotFound, "not a member any more");
+        assert_eq!(r.resolve_revoked("bravo", Some(&id(1))), Resolve::Found(id(2)));
+        assert_eq!(r.resolve_revoked("bra", Some(&id(1))), Resolve::Found(id(2)), "unambiguous prefix");
+        assert_eq!(r.added_by_closure(&id(2)).into_iter().collect::<Vec<_>>(), vec![id(3), id(4)]);
+        assert_eq!(r.resolve_revoked("c", None), Resolve::Found(id(7)), "only the revoked c");
+        assert_eq!(r.resolve_revoked("0808", None), Resolve::Found(id(8)), "id prefix of a tombstone without an entry");
+        assert_eq!(r.resolve_revoked("0202", None), Resolve::Found(id(2)), "id prefix");
+        assert_eq!(r.resolve_revoked("a", None), Resolve::NotFound, "a is a member, not revoked");
+        assert_eq!(r.resolve_revoked("bravo", Some(&id(2))), Resolve::NotFound, "this machine is never matched");
+        let mut two = r.clone();
+        two.tombstones.insert(id(3), Tombstone { id: id(3), revoked_at: 10, revoked_by: id(1) });
+        match two.resolve_revoked("c", None) {
+            Resolve::Ambiguous(l) => assert_eq!(l, vec!["c (03030303)".to_string(), "c (07070707)".to_string()]),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(two.resolve_revoked("0303", None), Resolve::Found(id(3)), "the id tells them apart");
+        // Existing roster files (tombstones as written before) load and resolve the same way.
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(!json.contains("\"name\":null"));
+        let back: Roster = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.resolve_revoked("bravo", None), Resolve::Found(id(2)));
     }
 
     #[test]

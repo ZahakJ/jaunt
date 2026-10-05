@@ -2,7 +2,7 @@
 # Host-only proof (no Docker): two daemons under separate JAUNT_HOME dirs and a local dev
 # relay on 127.0.0.1. Nothing outside target/tmp/host-e2e is touched; tmux runs only on
 # the private socket "jaunt-test".
-#   JAUNT_BIN=target/debug/jaunt RELAY_PORT=3350 test/e2e/00-host.sh
+#   JAUNT_BIN=target/debug/jaunt RELAY_PORT=3350 test/e2e/00-host.sh   (HOST_E2E_DIR=<dir> moves it)
 set -uo pipefail
 E2E_NAME=00-host
 . "$(dirname "$0")/lib.sh"
@@ -10,7 +10,7 @@ E2E_NAME=00-host
 BIN=${JAUNT_BIN:-$ROOT/target/debug/jaunt}
 RELAY_BIN=${RELAY_BIN:-$ROOT/spike/.tools/bin/iroh-relay}
 PORT=${RELAY_PORT:-3350}
-W=$ROOT/target/tmp/host-e2e
+W=${HOST_E2E_DIR:-$ROOT/target/tmp/host-e2e}
 unset TMUX TMUX_PANE XDG_RUNTIME_DIR XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME
 export JAUNT_TMUX_SOCKET=jaunt-test
 # Belt and braces: anything that forgets its own JAUNT_HOME lands here, never in the real home.
@@ -23,14 +23,15 @@ if ss -ltn | awk '{print $4}' | grep -q ":$PORT\$"; then echo "port $PORT is in 
 PIDS=()
 cleanup() {
   for p in "${PIDS[@]}"; do kill "$p" 2>/dev/null; done
-  for m in a b; do [ -f "$W/$m.pid" ] && kill "$(cat "$W/$m.pid")" 2>/dev/null; done
+  for m in a b c d; do [ -f "$W/$m.pid" ] && kill "$(cat "$W/$m.pid")" 2>/dev/null; done
+  for m in c d; do [ -f "$W/$m/data/daemon.lock" ] && JAUNT_HOME=$W/$m "$BIN" down >/dev/null 2>&1; done
   tmux -L jaunt-test kill-session -t e2e 2>/dev/null
   true
 }
 trap cleanup EXIT
 
 mkdir -p "$W" "$HOME"
-for m in a b; do
+for m in a b c d; do
   [ -d "$W/$m" ] && find "$W/$m" -mindepth 1 -delete
   mkdir -p "$W/$m/config"
   printf 'name = "host%s"\nrelays = ["http://127.0.0.1:%s"]\nportmapper = false\n' "$m" "$PORT" > "$W/$m/config/config.toml"
@@ -90,5 +91,39 @@ sed 's/^/    /' "$W/hop.out" | grep -E 'PASS|FAIL'
 check "hop survives a restart of the remote daemon" [ "$code" = 0 ]
 check "tmux session e2e still exists after the hop" tmux -L jaunt-test has-session -t e2e
 check "session content kept (MARK42 in the pane)" sh -c "tmux -L jaunt-test capture-pane -p -t e2e -S -50 | grep -q MARK42"
+
+# A daemon that started with no relay at all, then 'jaunt relay set': it must reach the
+# relay and link without being restarted (once a bug: "not connected to any relay" until
+# a restart, and a link failed with "no answer within 20 s").
+note "c starts with no relay; jaunt relay set; then c links d"
+jc() { JAUNT_HOME=$W/c "$BIN" "$@"; }
+jd() { JAUNT_HOME=$W/d "$BIN" "$@"; }
+for m in c d; do printf 'name = "host%s"\nportmapper = false\n' "$m" > "$W/$m/config/config.toml"; done
+start_daemon c
+check "c answers" wait_until 10 sh -c "JAUNT_HOME=$W/c $BIN ls >/dev/null"
+pid_c=$(jc ls --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["daemon_pid"])')
+jc check > "$W/c-check-before.out" 2>&1
+check "c without a relay: check says so" grep -q "no relay configured" "$W/c-check-before.out"
+jc relay set "http://127.0.0.1:$PORT" > "$W/c-relay-set.out" 2>&1
+check "jaunt relay set succeeds" [ $? = 0 ]
+sed 's/^/    c| /' "$W/c-relay-set.out"
+check "relay set reports the relay connected" grep -q "connected to the relay now" "$W/c-relay-set.out"
+check "c: jaunt check finds the relay connected" wait_until 15 sh -c "JAUNT_HOME=$W/c $BIN check 2>&1 | grep -q 'relay connected'"
+pid_c2=$(jc ls --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["daemon_pid"])')
+note "c's daemon pid before $pid_c, after $pid_c2"
+rm -f "$W/link-c.out"
+JAUNT_HOME=$W/c "$BIN" link --yes > "$W/link-c.out" 2>&1 &
+LINK=$!
+wait_until 20 grep -q '^code:' "$W/link-c.out"
+code=$(awk '/^code:/{print $2; exit}' "$W/link-c.out")
+printf '%s\n' "$code" | jd join --relay "http://127.0.0.1:$PORT" --yes > "$W/join-d.out" 2>&1
+rc=$?
+wait "$LINK"; rc_link=$?
+sed 's/^/    d| /' "$W/join-d.out" | tail -3
+check "d joins c (no daemon restart on c)" [ "$rc" = 0 ]
+check "c's link succeeds" [ "$rc_link" = 0 ]
+check "c sees d connected" wait_until 30 connected c hostd
+check "d sees c connected" wait_until 30 connected d hostc
+jd down >/dev/null 2>&1; jc down >/dev/null 2>&1
 
 finish

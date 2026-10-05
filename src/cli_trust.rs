@@ -131,11 +131,6 @@ pub async fn join(paths: &Paths, code_words: Vec<String>, relay: Option<String>,
         cfg.relays = relays.clone();
         cfg.save(paths)?;
     }
-    // A daemon that started without any relay has its endpoint built without one; start it
-    // again so it uses the relay from now on.
-    if running && daemon_relays.is_empty() && !relays.is_empty() {
-        crate::stop_daemon(paths).await?;
-    }
     pair(paths, IpcRequest::Join { code, relays, yes }, yes).await
 }
 
@@ -164,6 +159,9 @@ pub async fn unlink(paths: &Paths, target: String, cascade: bool, kill_sessions:
     let r = revoke_conversation(paths, IpcRequest::Unlink { target, cascade, kill_sessions }).await?;
     let ids: Vec<String> = r.revoked.iter().map(|p| format!("{} ({})", p.name, p.id.short())).collect();
     println!("unlinked {}: refused here from now on, connections closed, {} process(es) it ran here ended", ids.join(", "), r.sessions_killed);
+    if !r.already_revoked.is_empty() {
+        println!("({} had been unlinked before)", names(&r.already_revoked));
+    }
     if !r.confirmed.is_empty() {
         println!("confirmed by: {}", names(&r.confirmed));
     }

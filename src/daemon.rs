@@ -2,7 +2,7 @@
 //! member, serves incoming streams, syncs the roster, and records paths, RTT and events.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -35,14 +35,16 @@ const RTT_HISTORY: usize = 60;
 /// written its roster yet: try again this soon, this many times, before the normal cadence.
 const REFUSED_RETRY: Duration = Duration::from_secs(1);
 const REFUSED_FAST_TRIES: u32 = 15;
-/// H1: after an absence, sync with every other member (bounded) before serving anyone.
+/// H1: a settling round syncs with every other member, bounded by this.
 const SETTLE_LIMIT: Duration = Duration::from_secs(5);
 /// No authenticated contact with any member for this long counts as an absence.
 const ABSENT_AFTER_MS: u64 = 60_000;
 /// The daemon's 1 s monitor not running for this long means it was frozen or suspended.
 const TICK_GAP_MS: u64 = 5_000;
-/// How long a gated request waits for the settling round (it is bounded by SETTLE_LIMIT).
-const SETTLE_WAIT: Duration = Duration::from_secs(8);
+/// While unsettled, a request waits for a round that started at most this long before it.
+const ROUND_FRESH_MS: u64 = 2_000;
+/// While unsettled, the monitor starts a round on its own this often.
+const ROUND_BACKGROUND_MS: u64 = 30_000;
 /// How long a revoked peer's stream may still run so that the process it started gets the
 /// follow-up SIGKILL (`children::kill_peer` sends it after 1 s).
 const REVOKED_GRACE: Duration = Duration::from_secs(3);
@@ -109,37 +111,114 @@ pub struct Daemon {
 }
 
 /// H1. A machine that comes back from an absence (daemon start, a freeze or suspend, or no
-/// contact with any member for a minute) may hold a roster that misses a revocation. Until
-/// it has tried to sync with every other member (all attempts finished or `SETTLE_LIMIT`
-/// passed) it serves Sync and Ping only, so a revoked machine cannot win the race against
-/// the tombstone while any informed member is reachable.
+/// contact with any member for a minute) may hold a roster that misses a revocation. From
+/// then on it is *unsettled*: it serves a peer's Shell, Exec, Tcp or Copy only once it has
+/// completed a Sync with a member other than that peer (a round that reached nobody settles
+/// nothing), or when no member other than that peer exists. While unsettled, each such
+/// request waits for a settling round (at most `SETTLE_LIMIT`) and is served after it, so
+/// what remains is exactly: no other member was reachable within 5 s of the request.
 struct Settle {
-    open: watch::Sender<bool>,
-    running: AtomicBool,
-    /// Wall-clock ms of the monitor's last tick, of the last contact, of the last settling round.
+    state: Mutex<SettleState>,
+    /// The most recently started settling round that is still running: its start (wall
+    /// ms) and a receiver that turns true when it ends.
+    current: Mutex<Option<(u64, watch::Receiver<bool>)>>,
+    /// Start of the most recently started round.
+    last_round_start: AtomicU64,
+    /// Wall-clock ms of the monitor's last tick, of the last contact, and of the moment
+    /// this machine was last settled.
     last_tick: AtomicU64,
     last_contact: AtomicU64,
     last_settled: AtomicU64,
 }
 
+#[derive(Debug, Default)]
+struct SettleState {
+    /// Set while unsettled: since when.
+    unsettled_since: Option<u64>,
+    /// The members a Sync completed with since then.
+    synced: HashSet<MachineId>,
+}
+
+impl SettleState {
+    /// May a request from `peer` be served? `others` are the members other than this machine.
+    fn serves(&self, peer: &MachineId, others: &HashSet<MachineId>) -> bool {
+        self.unsettled_since.is_none() || self.synced.iter().any(|x| x != peer) || others.iter().all(|x| x == peer)
+    }
+
+    /// Would every member be served (then the machine is settled)?
+    fn serves_all(&self, others: &HashSet<MachineId>) -> bool {
+        others.len() <= 1 || self.synced.intersection(others).count() >= 2
+    }
+}
+
 impl Settle {
     fn new(now: u64) -> Settle {
         Settle {
-            open: watch::channel(false).0,
-            running: AtomicBool::new(false),
+            state: Mutex::new(SettleState { unsettled_since: Some(now), synced: HashSet::new() }),
+            current: Mutex::new(None),
+            last_round_start: AtomicU64::new(0),
             last_tick: AtomicU64::new(now),
             last_contact: AtomicU64::new(now),
             last_settled: AtomicU64::new(0),
         }
     }
 
-    /// Back from an absence at `now`: frozen or suspended (the monitor did not tick), or
-    /// no contact with any member for a minute and no settling round since.
-    fn absent(&self, now: u64) -> bool {
-        let gap = now.saturating_sub(self.last_tick.load(Ordering::Relaxed));
+    /// Called at least once a second (and before a gated request): notice a return from an
+    /// absence at `now` and become unsettled. A freeze or suspend (no call for over 5 s)
+    /// always starts over; no contact with any member for a minute makes a settled machine
+    /// unsettled. Returns why, for a new absence.
+    fn notice(&self, now: u64) -> Option<String> {
+        let gap = now.saturating_sub(self.last_tick.swap(now, Ordering::SeqCst));
+        if gap > TICK_GAP_MS {
+            self.unsettle(now);
+            return Some(format!("this machine was frozen or asleep for {} s", gap / 1000));
+        }
+        if self.silent(now) && self.is_settled() {
+            self.unsettle(now);
+            return Some("no contact with any member for a minute".into());
+        }
+        None
+    }
+
+    fn silent(&self, now: u64) -> bool {
         let quiet = now.saturating_sub(self.last_contact.load(Ordering::Relaxed));
         let settled = now.saturating_sub(self.last_settled.load(Ordering::Relaxed));
-        gap > TICK_GAP_MS || (quiet > ABSENT_AFTER_MS && settled > ABSENT_AFTER_MS)
+        quiet > ABSENT_AFTER_MS && settled > ABSENT_AFTER_MS
+    }
+
+    fn is_settled(&self) -> bool {
+        self.state.lock().map(|s| s.unsettled_since.is_none()).unwrap_or(false)
+    }
+
+    /// Start over: nothing synced since `now` yet.
+    fn unsettle(&self, now: u64) {
+        if let Ok(mut s) = self.state.lock() {
+            s.unsettled_since = Some(now);
+            s.synced.clear();
+        }
+    }
+
+    /// A Sync with `id` completed at `now`; settled once every member would be served.
+    fn synced(&self, id: MachineId, others: &HashSet<MachineId>, now: u64) {
+        self.last_contact.store(now, Ordering::Relaxed);
+        if let Ok(mut s) = self.state.lock()
+            && s.unsettled_since.is_some()
+        {
+            s.synced.insert(id);
+            self.settle_if_done(&mut s, others, now);
+        }
+    }
+
+    fn settle_if_done(&self, s: &mut SettleState, others: &HashSet<MachineId>, now: u64) {
+        if s.unsettled_since.is_some() && s.serves_all(others) {
+            s.unsettled_since = None;
+            s.synced.clear();
+            self.last_settled.store(now, Ordering::Relaxed);
+        }
+    }
+
+    fn serves(&self, peer: &MachineId, others: &HashSet<MachineId>) -> bool {
+        self.state.lock().map(|s| s.serves(peer, others)).unwrap_or(false)
     }
 }
 
@@ -251,7 +330,7 @@ pub async fn run(paths: Paths) -> Result<()> {
     tokio::spawn(d.clone().accept_loop());
     tokio::spawn(d.clone().supervisor());
     // A daemon start is a return from absence: settle before serving shells and commands.
-    d.begin_settle("daemon start");
+    d.begin_round("daemon start");
     tokio::spawn(d.clone().monitor());
     tokio::spawn(ipc::serve(d.clone(), listener));
     systemd::notify("READY=1");
@@ -746,9 +825,10 @@ impl Daemon {
         }
         if !matches!(hello.service, Service::Sync | Service::Ping) {
             // H1: after an absence, nothing but Sync and Ping until this machine has
-            // tried to sync with every other member; then ask again whether `id` is one.
-            if !self.wait_settled().await {
-                tracing::info!("served {} although settling did not finish in time", id.short());
+            // synced with a member other than `id` (or a round for this request reached
+            // none); then ask again whether `id` is one.
+            if !self.wait_settled(id).await {
+                tracing::info!("serving {} while unsettled: no other member was reachable", id.short());
             }
             if !self.is_member(&id) {
                 return self.refuse_logged(&id, &mut send, "not a member of this mesh").await;
@@ -859,7 +939,7 @@ impl Daemon {
                 return self.refuse_logged(&id, &mut send, &why).await;
             }
         };
-        self.note_contact();
+        self.note_synced(id);
         proto::write_json(&mut send, FrameType::Reply, &Reply::Ok).await?;
         let ours = self.roster_snapshot();
         proto::write_json(&mut send, FrameType::Json, &ours).await?;
@@ -903,6 +983,7 @@ impl Daemon {
             self.note_contact();
             if push.is_none() {
                 let changed = self.apply_remote_roster(&theirs, &id)?;
+                self.note_synced(id);
                 self.events.emit(Some(self.peer_ref(&id)), EventKind::Sync { changed, outgoing: true });
             }
             Ok(theirs)
@@ -918,7 +999,9 @@ impl Daemon {
         let res = timeout(Duration::from_secs(15), async {
             let theirs = Self::exchange_roster(&conn, &self.roster_snapshot()).await?;
             self.note_contact();
-            self.apply_remote_roster(&theirs, &id)
+            let changed = self.apply_remote_roster(&theirs, &id)?;
+            self.note_synced(id);
+            Ok::<bool, anyhow::Error>(changed)
         })
         .await;
         match res {
@@ -1118,19 +1201,33 @@ impl Daemon {
         self.settle.last_contact.store(now_ms(), Ordering::Relaxed);
     }
 
-    /// Close the gate and sync with every other member, at most `SETTLE_LIMIT`; then open it.
-    fn begin_settle(self: &Arc<Self>, why: &str) {
-        if self.settle.running.swap(true, Ordering::SeqCst) {
-            return;
+    fn others(&self) -> HashSet<MachineId> {
+        self.roster.lock().map(|r| member_set(&r, &self.me)).unwrap_or_default()
+    }
+
+    /// A Sync with `id` completed (either direction) and its roster was merged here.
+    fn note_synced(&self, id: MachineId) {
+        let now = now_ms();
+        let was = self.settle.is_settled();
+        self.settle.synced(id, &self.others(), now);
+        if !was && self.settle.is_settled() {
+            tracing::info!("settled: synced with a member since the absence");
         }
-        self.settle.open.send_replace(false);
-        let others: Vec<MachineId> =
-            self.roster.lock().map(|r| member_set(&r, &self.me).into_iter().collect()).unwrap_or_default();
-        if others.is_empty() || why.starts_with("no contact") {
-            tracing::debug!("settling ({why}): {} other member(s)", others.len());
-        } else {
-            tracing::info!("settling ({why}): syncing with {} other member(s) before serving anyone", others.len());
+    }
+
+    /// One settling round: sync with every other member at once, at most `SETTLE_LIMIT`,
+    /// dialling through the relay and the remembered direct addresses. Each completed Sync
+    /// counts (`note_synced`); a round that reached nobody settles nothing. Returns a
+    /// receiver that turns true when the round is over. Rounds may overlap.
+    fn begin_round(self: &Arc<Self>, why: &str) -> watch::Receiver<bool> {
+        let (done_tx, done_rx) = watch::channel(false);
+        let start = now_ms();
+        if let Ok(mut g) = self.settle.current.lock() {
+            *g = Some((start, done_rx.clone()));
         }
+        self.settle.last_round_start.store(start, Ordering::Relaxed);
+        let others: Vec<MachineId> = self.others().into_iter().collect();
+        tracing::info!("settling ({why}): syncing with {} other member(s)", others.len());
         let d = self.clone();
         tokio::spawn(async move {
             let deadline = tokio::time::Instant::now() + SETTLE_LIMIT;
@@ -1139,16 +1236,21 @@ impl Daemon {
                 let d2 = d.clone();
                 set.spawn(async move {
                     // A connection from before the absence can be dead without knowing it
-                    // yet; while time is left, try again (the retry dials afresh).
+                    // yet: give it 2.5 s, then close it so that the retry dials afresh.
                     for _ in 0..3 {
                         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
                         if left.is_zero() {
                             break;
                         }
-                        match d2.sync_once(id, None, left).await {
+                        let old = d2.live_conn(&id);
+                        let limit = if old.is_some() { left.min(Duration::from_millis(2500)) } else { left };
+                        match d2.sync_once(id, None, limit).await {
                             Ok(_) => return true,
                             Err(e) => {
                                 tracing::debug!("settling: sync with {} failed: {e:#}", id.short());
+                                if let Some(c) = old {
+                                    c.close(CLOSE_NORMAL.into(), b"no answer");
+                                }
                                 tokio::time::sleep(Duration::from_millis(250)).await;
                             }
                         }
@@ -1161,27 +1263,58 @@ impl Daemon {
                 if matches!(r, Ok(true)) { ok += 1 } else { missed += 1 }
             }
             set.abort_all();
-            if ok + missed > 0 {
-                tracing::info!("settled: synced with {ok}, not reached {missed}");
+            let now = now_ms();
+            let others = d.others();
+            if let Ok(mut s) = d.settle.state.lock() {
+                d.settle.settle_if_done(&mut s, &others, now);
             }
-            d.settle.last_settled.store(now_ms(), Ordering::Relaxed);
-            d.settle.running.store(false, Ordering::SeqCst);
-            d.settle.open.send_replace(true);
+            let settled = d.settle.is_settled();
+            tracing::info!(
+                "settling round done: synced with {ok}, not reached {missed}; {}",
+                if settled { "settled" } else { "still unsettled (shells and commands wait for a round each)" }
+            );
+            if let Ok(mut g) = d.settle.current.lock()
+                && g.as_ref().is_some_and(|(s, _)| *s == start)
+            {
+                *g = None;
+            }
+            let _ = done_tx.send(true);
         });
+        done_rx
     }
 
-    /// For a request that needs settling: start a round if this is a return from absence,
-    /// and wait for it. False when it did not finish in time (it is bounded, so rare).
-    async fn wait_settled(self: &Arc<Self>) -> bool {
-        if self.settle.absent(now_ms()) {
-            self.begin_settle("back from an absence");
+    /// For a Shell, Exec, Tcp or Copy request from `peer`: while unsettled, wait for a
+    /// settling round that started at most 2 s before the request (joining the running one
+    /// if it is that fresh, else starting one) and serve after it. False when served
+    /// without having synced with a member other than `peer`.
+    async fn wait_settled(self: &Arc<Self>, peer: MachineId) -> bool {
+        let asked = now_ms();
+        if let Some(why) = self.settle.notice(asked) {
+            self.begin_round(&why);
         }
-        let mut rx = self.settle.open.subscribe();
-        matches!(timeout(SETTLE_WAIT, rx.wait_for(|open| *open)).await, Ok(Ok(_)))
+        if self.settle.serves(&peer, &self.others()) {
+            return true;
+        }
+        let fresh = |start: u64| start.saturating_add(ROUND_FRESH_MS) >= asked;
+        let running = self
+            .settle
+            .current
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().filter(|(start, _)| fresh(*start)).map(|(_, rx)| rx.clone()));
+        let mut rx = match running {
+            Some(rx) => rx,
+            // A fresh round already ended (it reached nobody but `peer`, or nobody).
+            None if fresh(self.settle.last_round_start.load(Ordering::Relaxed)) => return false,
+            None => self.begin_round(&format!("a request from {} while unsettled", self.name_of(&peer))),
+        };
+        let _ = timeout(SETTLE_LIMIT + Duration::from_secs(1), rx.wait_for(|done| *done)).await;
+        self.settle.serves(&peer, &self.others())
     }
 
-    /// Once a second: notice a freeze or suspend (the tick came late) or a long silence.
-    /// Once a minute: keep the detached daemon's log bounded.
+    /// Once a second: notice a freeze or suspend (the tick came late) or a long silence,
+    /// and while unsettled run a round now and then. Once a minute: keep the detached
+    /// daemon's log bounded.
     async fn monitor(self: Arc<Self>) {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1193,12 +1326,14 @@ impl Daemon {
                 rotate_own_log(&self.paths.daemon_log());
             }
             let now = now_ms();
-            if self.settle.absent(now) {
-                let gap = now.saturating_sub(self.settle.last_tick.load(Ordering::Relaxed));
-                let why = if gap > TICK_GAP_MS { format!("this machine was frozen or asleep for {} s", gap / 1000) } else { "no contact with any member for a minute".into() };
-                self.begin_settle(&why);
+            if let Some(why) = self.settle.notice(now) {
+                self.begin_round(&why);
+            } else if !self.settle.is_settled()
+                && self.settle.current.lock().map(|g| g.is_none()).unwrap_or(false)
+                && now.saturating_sub(self.settle.last_round_start.load(Ordering::Relaxed)) > ROUND_BACKGROUND_MS
+            {
+                self.begin_round("still unsettled");
             }
-            self.settle.last_tick.store(now, Ordering::Relaxed);
         }
     }
 
@@ -1351,6 +1486,27 @@ impl Daemon {
                 bail!("no machine called '{target}' (known: {})", names.join(", "))
             }
             Resolve::Ambiguous(names) => bail!("'{target}' could mean {}; type more of the name", names.join(" or ")),
+        }
+    }
+
+    /// The machine `unlink` acts on. Members first; with `revoked_too` (`--cascade` or
+    /// `--kill-sessions`), a machine that is already revoked is found too (by name, prefix
+    /// or id prefix), so what it added can still be revoked and its sessions ended.
+    pub fn resolve_unlink(&self, target: &str, revoked_too: bool) -> Result<MachineId> {
+        let r = self.roster_snapshot();
+        if r.resolve(target, Some(&self.me)) != Resolve::NotFound || r.resolve(target, None) == Resolve::Found(self.me) {
+            return self.resolve(target);
+        }
+        match r.resolve_revoked(target, Some(&self.me)) {
+            Resolve::Found(id) if revoked_too => Ok(id),
+            Resolve::Found(id) => bail!(
+                "{} is already unlinked; to revoke the machines it added: jaunt unlink {target} --cascade (--kill-sessions ends the tmux sessions it created)",
+                r.revoked_label(&id)
+            ),
+            Resolve::Ambiguous(labels) => {
+                bail!("'{target}' could mean the unlinked machines {}; give the start of the id instead", labels.join(" or "))
+            }
+            Resolve::NotFound => self.resolve(target),
         }
     }
 
@@ -1510,19 +1666,76 @@ async fn open_service_nowait(conn: &Connection, service: Service) -> Result<(Sen
 mod tests {
     use super::*;
 
-    /// H1: what counts as coming back from an absence.
+    fn round_ends(s: &Settle, others: &HashSet<MachineId>, now: u64) {
+        let mut st = s.state.lock().unwrap();
+        s.settle_if_done(&mut st, others, now);
+    }
+
+    /// H1: what counts as an absence, and what ends one (this machine is b; a and c are
+    /// the other members; c is the one asking).
     #[test]
-    fn absence_is_a_late_tick_or_a_long_silence() {
+    fn unsettled_until_synced_with_a_member_other_than_the_requester() {
+        let (a, c, d) = (MachineId([1; 32]), MachineId([3; 32]), MachineId([4; 32]));
+        let others: HashSet<MachineId> = [a, c].into();
         let t0 = 1_000_000;
         let s = Settle::new(t0);
-        assert!(!s.absent(t0 + 1_000), "a normal second");
-        assert!(s.absent(t0 + TICK_GAP_MS + 1), "the monitor did not run: frozen or asleep");
-        s.last_tick.store(t0 + 70_000, Ordering::Relaxed);
-        assert!(s.absent(t0 + 70_500), "no contact with any member for over a minute");
-        s.last_settled.store(t0 + 70_000, Ordering::Relaxed);
-        assert!(!s.absent(t0 + 70_500), "but not again right after a settling round");
-        s.last_contact.store(t0 + 70_400, Ordering::Relaxed);
-        s.last_settled.store(0, Ordering::Relaxed);
-        assert!(!s.absent(t0 + 70_500), "recent contact");
+        assert!(!s.is_settled(), "a daemon start is an absence");
+        assert!(!s.serves(&c, &others));
+        round_ends(&s, &others, t0 + 5_000);
+        assert!(!s.is_settled(), "a round that reached nobody settles nothing");
+        s.synced(c, &others, t0 + 5_100);
+        assert!(!s.serves(&c, &others), "a sync with the requester itself does not count for it");
+        assert!(s.serves(&a, &others), "but it does for any other requester");
+        assert!(!s.is_settled());
+        s.synced(a, &others, t0 + 5_200);
+        assert!(s.is_settled() && s.serves(&c, &others), "synced with a: settled");
+
+        // A freeze or suspend: the monitor did not run for over 5 s.
+        assert!(s.notice(t0 + 1_000).is_none(), "a normal second");
+        assert!(s.notice(t0 + 1_000 + TICK_GAP_MS + 1).is_some(), "frozen or asleep");
+        assert!(!s.serves(&c, &others));
+        s.synced(a, &others, t0 + 20_000);
+        assert!(s.serves(&c, &others) && !s.serves(&a, &others), "c is served after a sync with a; a is not yet");
+        s.synced(c, &others, t0 + 20_100);
+        assert!(s.is_settled());
+
+        // A network-only outage: the monitor keeps ticking, nobody answers. After a minute
+        // of silence the machine is unsettled, and no amount of time settles it again.
+        let t1 = t0 + 20_100;
+        s.last_tick.store(t1, Ordering::Relaxed);
+        let mut became = 0;
+        for k in 1..=300 {
+            let now = t1 + k * 1_000;
+            if s.notice(now).is_some() {
+                became += 1;
+                assert!(now - t1 > ABSENT_AFTER_MS);
+            }
+            if k % 5 == 0 {
+                round_ends(&s, &others, now);
+            }
+        }
+        assert_eq!(became, 1, "one absence, noticed once");
+        assert!(!s.is_settled() && !s.serves(&c, &others), "rounds that reached nobody and time alone settle nothing");
+        // The network returns; c is the first to talk to b (pings, even a sync).
+        s.last_contact.store(t1 + 301_000, Ordering::Relaxed);
+        s.synced(c, &others, t1 + 301_000);
+        assert!(!s.serves(&c, &others), "contact with c alone does not let c in");
+        s.synced(a, &others, t1 + 302_000);
+        assert!(s.serves(&c, &others) && s.is_settled());
+
+        // Nobody else to ask: the only other member is the requester, or there is none.
+        let only_c: HashSet<MachineId> = [c].into();
+        let s = Settle::new(t0);
+        assert!(s.serves(&c, &only_c), "no member but c could have heard of a revocation of c");
+        round_ends(&s, &only_c, t0 + 10);
+        assert!(s.is_settled());
+        let s = Settle::new(t0);
+        round_ends(&s, &HashSet::new(), t0 + 10);
+        assert!(s.is_settled(), "no other members");
+        // A third member that is not reached keeps it unsettled for the two that are.
+        let three: HashSet<MachineId> = [a, c, d].into();
+        let s = Settle::new(t0);
+        s.synced(a, &three, t0 + 10);
+        assert!(!s.is_settled() && s.serves(&c, &three) && s.serves(&d, &three) && !s.serves(&a, &three));
     }
 }

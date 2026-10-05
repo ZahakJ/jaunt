@@ -45,7 +45,7 @@ jaunt up                                                       # install and sta
 jaunt link                                                     # shows a code like 4127-tremor-kudos
 ```
 
-Give the relay at install time (or run `jaunt relay set URL` before anything else). If the daemon was already running without a relay, `jaunt relay set` does not connect it until the daemon restarts (a bug found while writing this; `jaunt check` then says "not connected to any relay"). Fix: `jaunt down && jaunt up`.
+Give the relay at install time, or run `jaunt relay set URL` before anything else. A running daemon switches to the new relay at once, and `jaunt relay set` says when it is connected.
 
 ![The code screen of jaunt link](captures/link-code-80x24-truecolor.png)
 
@@ -264,7 +264,7 @@ What jaunt protects: a shell as you on every one of your machines. That makes it
 | someone who knows the relay URL or a machine id | ids are public keys; knowing one grants nothing |
 | someone intercepting a pairing | SPAKE2: one guess per code (1 in 60 million), the code dies on a wrong guess, lives 5 minutes, works once; each side proves it holds the key it claims; the roster is sent only after both people said yes; a joining machine never tries the same code twice |
 | a lost laptop, after `jaunt unlink` | permanent tombstone, pushed to every reachable machine and spread by sync; its connections are closed, its commands and shell clients ended; its tmux sessions too with `--kill-sessions` |
-| a revoked machine racing a machine that was asleep, frozen or just restarted | after such an absence a daemon serves only roster sync until it has tried every other member (up to 5 s); tested in the lab |
+| a revoked machine racing a machine that was asleep, frozen, restarted or off the network | after such an absence a daemon serves a machine shells, commands, ports and copies only once it has synced with some other member; until then each such request waits for one sync attempt with every other member (up to 5 s). Tested in the lab: a freeze, and three network outages with the daemon running |
 | a revoked or broken member stuffing the roster to block revocations | roster merges are bounded and take tombstones first |
 | other users on the same machine | key and socket are private (0600 in 0700 directories); the client checks the socket's owner; the pairing code is typed, not passed on the command line |
 | strings from other machines messing up your terminal | control characters are removed before printing |
@@ -275,7 +275,7 @@ What jaunt protects: a shell as you on every one of your machines. That makes it
 | Threat | What it means, what to do |
 | --- | --- |
 | a stolen laptop that is unlocked and not yet revoked | it is a full member until you revoke it. Use disk encryption and a screen lock. The key file has no passphrase (the daemon must start unattended) |
-| a member that was **offline on the network** during the revocation | it accepts the revoked machine as soon as it is back, until it syncs with a machine that knows (in the lab, one of two rounds let 5 of 5 commands through). Suspend, freeze and restart are covered (above); a plain network outage is not. `unlink` lists who has not heard |
+| a member that missed the revocation and cannot reach a machine that knows | when it is back it lets the revoked machine in only if no other member answered within 5 s of the request (or the one that answered had not heard either), and keeps doing so until it syncs with a machine that knows. An outage shorter than a minute, with no sleep or freeze, does not count as an absence. `unlink` lists who has not heard |
 | a compromised member | trust is flat: it can reach every machine, link new ones and revoke the others. It can also fill the roster's entry limit (new links then fail until `jaunt reset`) and lie about which machines it added, so `--cascade` misses them |
 | traffic analysis | the relay and the network see who talks to whom, when and how much; the machine id is visible in the handshake, so an observer can recognise a machine across networks |
 | denial of service | the relay can drop traffic; anyone who knows the relay URL can block pairing (the pairing fails, nothing leaks) |
@@ -321,18 +321,18 @@ All of this comes from the Docker test lab on one computer (`test/harness`): mac
 
 ### Keystroke round trip
 
-One letter typed into a tmux session on b running `cat`, timed until it is echoed back. 200 samples per row, two full runs. "Harness delay" is added on every router hop, so a direct path has 4× that delay and a relayed one 6×.
+One letter typed into a tmux session on b running `cat`, timed until it is echoed back. 200 samples per row, three full runs (run 3, after the last fixes, is the one in `docs/measurements.md`). "Harness delay" is added on every router hop, so a direct path has 4× that delay and a relayed one 6×.
 
-| harness delay | path | run 1 median / p95 (ms) | run 2 median / p95 (ms) |
-| --- | --- | --- | --- |
-| 0 ms | jaunt direct | 0.42 / 0.68 | 0.6 / 1.75 |
-| 0 ms | jaunt relayed | 1.0 / 1.52 | 0.98 / 2.33 |
-| 0 ms | ssh through the relay host (default) | 7.0 / 9.09 | 10.0 / 11.87 |
-| 0 ms | ssh through the relay host (`ObscureKeystrokeTiming=no`) | 0.7 / 0.87 | 0.51 / 0.74 |
-| 20 ms | jaunt direct | 80.82 / 81.69 | 80.84 / 81.88 |
-| 20 ms | jaunt relayed | 120.97 / 121.57 | 121.17 / 121.94 |
-| 20 ms | ssh through the relay host (default) | 128.48 / 131.52 | 138.63 / 141.54 |
-| 20 ms | ssh through the relay host (`ObscureKeystrokeTiming=no`) | 120.73 / 121.46 | 120.87 / 121.48 |
+| harness delay | path | run 1 median / p95 (ms) | run 2 median / p95 (ms) | run 3 median / p95 (ms) |
+| --- | --- | --- | --- | --- |
+| 0 ms | jaunt direct | 0.42 / 0.68 | 0.6 / 1.75 | 0.39 / 1.13 |
+| 0 ms | jaunt relayed | 1.0 / 1.52 | 0.98 / 2.33 | 0.95 / 1.17 |
+| 0 ms | ssh through the relay host (default) | 7.0 / 9.09 | 10.0 / 11.87 | 8.49 / 10.55 |
+| 0 ms | ssh through the relay host (`ObscureKeystrokeTiming=no`) | 0.7 / 0.87 | 0.51 / 0.74 | 0.69 / 0.91 |
+| 20 ms | jaunt direct | 80.82 / 81.69 | 80.84 / 81.88 | 80.84 / 80.97 |
+| 20 ms | jaunt relayed | 120.97 / 121.57 | 121.17 / 121.94 | 121.05 / 121.38 |
+| 20 ms | ssh through the relay host (default) | 128.48 / 131.52 | 138.63 / 141.54 | 123.5 / 127.44 |
+| 20 ms | ssh through the relay host (`ObscureKeystrokeTiming=no`) | 120.73 / 121.46 | 120.87 / 121.48 | 120.85 / 123.09 |
 
 At 0 ms the numbers show the software's own cost. jaunt has no predictive echo (mosh's trick), so on a relayed path every keystroke waits for the relay round trip, just as with SSH.
 
@@ -357,7 +357,7 @@ The slow roam is a known problem: after an outage, iroh 1.3 backs off reconnecti
 | `jaunt cp`, 200 MB, direct | 296 MB/s push, 128 MB/s pull |
 | `jaunt cp`, 200 MB, relayed | 224 MB/s push, 237 MB/s pull |
 | 50 MB piped through `ssh` over `jaunt pipe` | 130 MB/s direct, 118 MB/s relayed |
-| release binary | 10,700,584 bytes, static (musl), x86_64 Linux |
+| release binary | 10,712,872 bytes, static (musl), x86_64 Linux |
 
 The throughput rows are from one computer with no bandwidth limit, so they show that jaunt is not the bottleneck, not what your network will do. Relayed is as fast as direct here only because the relay runs on the same computer.
 
@@ -367,10 +367,10 @@ The throughput rows are from one computer with no bandwidth limit, so they show 
 
 | Tested | Where |
 | --- | --- |
-| the whole flow: link, join, hop, onward hop, run, cp, fwd, pipe with OpenSSH, unlink and lock-out, a revoked machine racing a frozen one, direct and relayed paths, hard NAT, relay down and back, drops, roams, freezes, daemon restarts, latency | Docker NAT lab on one Arch Linux computer: 9 scripts, 217 checks, all passing in two full runs with the release binary |
+| the whole flow: link, join, hop, onward hop, run, cp, fwd, pipe with OpenSSH, unlink and lock-out, a revoked machine racing a frozen one and one cut off from the network, direct and relayed paths, hard NAT, relay down and back, drops, roams, freezes, daemon restarts, latency | Docker NAT lab on one Arch Linux computer: 9 scripts, 243 checks, all passing in a full run with the current release binary (the build before passed its 217 checks twice) |
 | that the daemon contacts nothing but the relay and linked machines | lab, counted from outside on the routers |
 | this README's commands (install from file, up, relay set, link and join typed on a terminal, hop, Enter ~ ., tmux detach and re-attach, `fern:work`, the mesh view, `ls`, `run`, `cp` both ways, `fwd`, `pipe`, `check`, `host status`, `name`, `unlink --kill-sessions` and lock-out, `--cascade`, `leave`, `reset`, `down`, `uninstall`, the tmux snippet's prefix J popup and F12) | sandbox on the host (separate `JAUNT_HOME` directories, a local test relay, a private tmux socket) |
-| roster merging, pairing attacks, frame limits, host-mode logic, local hardening | 132 unit tests |
+| roster merging, pairing attacks, frame limits, host-mode logic, settling, local hardening | 133 unit tests |
 | host mode's real logind lock | the desktop (no lid, no battery) |
 
 | Only simulated | |
@@ -418,9 +418,9 @@ jaunt unlink fern --kill-sessions
 
 - fern is refused here at once. Its connections are closed, every command and shell client it was running here is ended, and with `--kill-sessions` the tmux sessions it created are ended here and on every machine that confirms.
 - The revocation is pushed to every machine that can be reached. The output lists **who confirmed** and **who has not heard yet**.
-- If fern linked other machines and you want them gone too: `jaunt unlink fern --cascade`. Plain `unlink` warns when such machines exist. Once fern is revoked, `--cascade` can no longer be used on it; revoke those machines by name.
+- If fern linked other machines and you want them gone too: `jaunt unlink fern --cascade`. Plain `unlink` warns when such machines exist. This also works after fern was revoked. If several revoked machines share the name, give the start of the id instead (`jaunt unlink 1a013197 --cascade`; `jaunt ls --json` lists revoked ids).
 
-**The window.** A machine that has not heard still accepts fern until it syncs with one that has (daemons retry every 30 s and on every reconnect). Machines coming back from sleep, a freeze or a restart sync first; a machine that was simply off the network does not. So: get every machine on the "not heard yet" list online, and check `jaunt unlink` or `jaunt ls` on it.
+**The window.** A machine that has not heard still accepts fern until it syncs with one that has (daemons retry every 30 s and on every reconnect). A machine coming back from sleep, a freeze, a restart or a network outage of a minute or more serves fern nothing until it has synced with another member; it lets fern in only if no other member answered within 5 s of fern's request. So: get every machine on the "not heard yet" list online, and check `jaunt unlink` or `jaunt ls` on it.
 
 **What revocation does not undo** (jaunt prints this reminder too): processes fern started outside its own tmux sessions, files it wrote or copied, cron jobs, SSH keys or config it changed. If the laptop may be in someone else's hands, check the machines it could reach and replace any secrets it held.
 
@@ -451,7 +451,7 @@ If a thief revoked your other machines first: run `jaunt reset` on each of yours
 - **Where to host the relay.** A small VPS is recommended ([`deploy/relay/README.md`](deploy/relay/README.md)). Fly.io does not work for this as shipped. The desktop behind the Cloudflare tunnel works only as a relay of last resort (no direct paths through it).
 - **Making the repository public.** Before that: `install.sh` names the GitHub account `ZahakJ/jaunt` as the download location, and one older commit still contains your home directory path (the current files do not). Rewriting history to remove it is your call.
 - **When to retire the Cloudflare path.** Not before the real-world test above has passed and jaunt has been used for a while.
-- Whether the remaining gaps matter enough to fix: the offline-member revocation window, the slow roam after an outage, signed releases.
+- Whether the remaining gaps matter enough to fix: the revocation window when no informed machine is reachable, the slow roam after an outage, signed releases.
 
 ---
 
