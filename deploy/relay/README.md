@@ -121,18 +121,19 @@ session between two NATed machines is relayed through Cloudflare's edge and the 
 a machine on the desktop's own LAN, or one with a public IPv6 address, may still go
 direct.
 
-Relay config (`relay-http.toml`, not in this directory, because it is three lines):
+`desktop-tunnel.sh` in this directory does the desktop side (no root, everything in your
+home directory, `undo` removes it):
 
-```toml
-http_bind_addr = "127.0.0.1:3340"
-enable_metrics = false
-enable_quic_addr_discovery = false
+```sh
+sh deploy/relay/desktop-tunnel.sh install      # relay as a user service on 127.0.0.1:3340
 ```
 
-Run `iroh-relay -c relay-http.toml` (as a user service), and add an ingress rule to the
-tunnel: `hostname: relay.example.net` → `service: http://localhost:3340`. Cloudflare
-terminates TLS, so Cloudflare sees relay metadata (ids, timing, sizes), never content.
-This project does not touch the tunnel; the rule is yours to add and remove.
+Then add a public hostname to one of the tunnels that already run on the desktop, in the
+Cloudflare Zero Trust dashboard (Networks > Tunnels > the tunnel > Public Hostname):
+`relay.example.net`, service `HTTP`, `127.0.0.1:3340`. Check with
+`curl -fsS https://relay.example.net/ping`, then `jaunt relay set https://relay.example.net`.
+Cloudflare terminates TLS, so Cloudflare sees relay metadata (ids, timing, sizes), never
+content. The script does not touch the tunnel; the hostname is yours to add and remove.
 
 Untested: WebSocket upgrade through the tunnel for `/relay` (expected to work; Cloudflare
 proxies WebSockets), and how long Cloudflare keeps an idle WebSocket open.
