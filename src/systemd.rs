@@ -74,9 +74,20 @@ pub fn up(paths: &Paths) -> Result<()> {
         return Ok(());
     }
     systemctl(&["daemon-reload"])?;
+    // Clear a start limit left by earlier failed starts; fine if there is none.
+    let _ = Command::new("systemctl").args(["--user", "reset-failed", "jaunt.service"]).stderr(std::process::Stdio::null()).status();
     systemctl(&["enable", "--now", "jaunt.service"])?;
     println!("jaunt daemon enabled and started (systemctl --user status jaunt)");
     Ok(())
+}
+
+/// Is the service running under the user manager right now?
+pub fn unit_active() -> bool {
+    Command::new("systemctl")
+        .args(["--user", "is-active", "--quiet", "jaunt.service"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 pub fn unit_installed(paths: &Paths) -> bool {

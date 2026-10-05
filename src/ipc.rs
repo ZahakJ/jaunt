@@ -384,3 +384,13 @@ mod tests {
         assert_eq!(env.last().unwrap().1, OsString::from("/usr/bin"));
     }
 }
+
+/// Is the single-instance lock free, i.e. has a stopping daemon fully gone?
+pub fn lock_is_free(paths: &Paths) -> bool {
+    let Ok(f) = std::fs::OpenOptions::new().read(true).open(paths.lock_file()) else { return true };
+    let free = rustix::fs::flock(&f, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_ok();
+    if free {
+        let _ = rustix::fs::flock(&f, rustix::fs::FlockOperation::Unlock);
+    }
+    free
+}

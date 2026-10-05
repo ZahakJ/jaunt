@@ -287,6 +287,17 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Some(Cmd::Up) => {
+            // A daemon that an earlier command started by hand holds the single-instance
+            // lock, and the service would fail to start beside it: hand over to systemd.
+            if paths.jaunt_home.is_none() && !systemd::unit_active() && stop_daemon(&paths).await? {
+                for _ in 0..60 {
+                    if ipc::lock_is_free(&paths) {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                println!("stopped the daemon that was running outside systemd; the service takes over");
+            }
             systemd::up(&paths)?;
             Ok(0)
         }
@@ -365,6 +376,8 @@ pub(crate) async fn stop_daemon(paths: &Paths) -> Result<bool> {
 async fn down(paths: &Paths) -> Result<i32> {
     if systemd::unit_installed(paths) {
         systemd::down_unit()?;
+        // Also a daemon that was started outside the service, if one is still there.
+        let _ = stop_daemon(paths).await;
         println!("jaunt service stopped and disabled");
     } else if stop_daemon(paths).await? {
         println!("jaunt daemon stopped");
