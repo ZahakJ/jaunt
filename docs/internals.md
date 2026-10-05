@@ -180,18 +180,23 @@ way to see the stream.
   (a freeze or suspend), or no authenticated contact with any member for 60 s (contact is a
   sync either way or a ping answered or served). From then on the daemon is *unsettled*.
   It serves Sync and Ping always; it serves a peer's Shell, Exec, Tcp, Copy or
-  KillSessions only once a Sync (either direction, a settling round's or any other) has
-  completed since the absence with a member other than that peer, or when no member other
-  than that peer exists (nobody else could know of its revocation). It is settled again
-  once that holds for every member (synced with two members, or with the only one). A
-  round that reached nobody settles nothing, and no timer settles it. While unsettled each
-  such request waits for a settling round that started at most 2 s before it (joining the
-  running one, else starting one), then re-checks the requester's membership and is served.
-  A round syncs with every other member at once for at most 5 s, dialling through the relay
-  and the remembered direct addresses (a connection from before that does not answer in
-  2.5 s is closed and dialled again). While unsettled the monitor also starts a round every
-  30 s. The cost: while unsettled, a request whose answer has to come from an unreachable
-  member waits up to 5 s.
+  KillSessions at once if a Sync (either direction, a settling round's or any other) has
+  completed since the absence with a member other than that peer, or if no member other
+  than that peer exists (nobody else could know of its revocation); it is settled once that
+  holds for every member. Otherwise the request waits for a settling round that started
+  at or after the moment the requester's connection was established and after the absence
+  began (joining a running one, else starting one): that connection proves the network
+  was up while the round ran, so rounds that ran during an outage never count. If the round
+  syncs with another member, settled as above; if it completes without reaching any, the
+  daemon is **provisionally settled** and serves everyone without waiting until the next
+  absence. Then the requester's membership is checked again and it is served. So the wait
+  is at most once per absence (up to 5 s). A round syncs with every other member at once,
+  dialling through the relay and the remembered direct addresses; it ends when every
+  attempt has ended (failed dials are retried while time is left; a connection from before
+  that does not answer in 2.5 s is closed and dialled again), at most 5 s. While unsettled
+  the monitor also starts a round every 30 s; the keepers keep dialling every 30 s in any
+  case, and a tombstone that arrives later ends the revoked machine's connections and
+  processes as usual.
 - Every served stream (shell, exec, tcp, copy) ends when its peer stops being a member,
   besides the process kills below.
 - Every adopted connection (either direction) accepts streams, samples the selected path
@@ -281,13 +286,14 @@ receiver.
 
 **Window for a machine that was away during an unlink.** A machine back from an absence
 serves a peer no shell, command, port or copy until it has synced with some other member
-(settling, above), whether the absence was a freeze, a suspend, a restart or a network-only
-outage with the daemon running. **What is left, exactly:** a request from the revoked
-machine is served when no member other than it was reachable within 5 s of the request
-(the others offline, or the relay down and no direct path to them), or when the member it
-synced with had not heard either. It is then served until this machine syncs with an
-informed member (rounds every 30 s while unsettled, keepers every 30 s, and every
-reconnect). Absences shorter than a minute without a freeze are not noticed. A machine that
+or a settling round run with the network up reached none (settling, above), whether the
+absence was a freeze, a suspend, a restart or a network-only outage with the daemon
+running. **What is left, exactly:** a machine returning from an absence serves a revoked
+machine only if no informed member answered within 5 s of the revoked machine's first
+request (the others offline, the relay down and no direct path to them, or the member that
+answered had not heard either), and then only until an informed member becomes reachable
+(keepers dial every 30 s and on every reconnect; the tombstone then ends its connections
+and processes). Absences shorter than a minute without a freeze are not noticed. A machine that
 never left learns of a revocation by the push or by its next sync. `03-unlink.sh` checks
 the freeze case (b frozen 60 s) once and the network-only case (b blackholed 90 s, daemon
 running) three times: each time c sends five commands to b the moment b is back, and none
@@ -355,7 +361,7 @@ The daemon is never started by `check`.
 - `scripts/build-release.sh`: static x86_64 musl binary built in a throwaway `debian:12`
   container with rustup (toolchain pinned, default 1.97.1); caches under
   `target/musl-build/` (about 1.8 GB); output `dist/jaunt-x86_64-linux-musl` and `.sha256`.
-  First build 3 min with `-j 4`; static-pie, 10.7 MB (10 712 872 bytes with settling v2 and the relay fix) with rustc 1.97.1.
+  First build 3 min with `-j 4`; static-pie, 10.7 MB (10 712 904 bytes with settling v2 and the relay fix) with rustc 1.97.1.
   The whole e2e suite passes with it (the harness installs a binary under its file name, so
   copy it to a file called `jaunt` first).
 - `install.sh` (POSIX sh, no root): downloads the release asset and its `.sha256` from
@@ -386,9 +392,10 @@ The daemon is never started by `check`.
   singly; host mode: heat dipping for one sample still trips, a flapping cable and an
   alternating weak charger release, a hung sensor read (a FIFO) releases, lost CPU
   sensors are unknown heat; local: uninstall removes only jaunt's files, the daemon's
-  PATH and environment, systemd unit quoting, settling (what starts an absence, that only a
+  PATH and environment, systemd unit quoting, settling (what starts an absence, that a
   sync with a member other than the requester ends it, that rounds reaching nobody and time
-  alone do not), revoked machines resolving for `unlink --cascade`, address hints.
+  alone do not, that a round started before the requester's connection does not count, and
+  provisional settling after one that started later), revoked machines resolving for `unlink --cascade`, address hints.
 - `test/e2e/00-host.sh`: two daemons on the host (JAUNT_HOME under `target/tmp`, or
   `HOST_E2E_DIR`; dev relay on 127.0.0.1, tmux `-L jaunt-test`), run, events, and a pty hop
   that survives SIGTERM and SIGKILL restarts of the remote daemon; then a daemon started
@@ -404,7 +411,9 @@ The daemon is never started by `check`.
   (with the build before settling, all five did); b learns of the unlink (time printed).
   Then three rounds of the network-only case: c linked again, b blackholed 90 s with its
   daemon running while a unlinks c, c sends five commands the moment b's network is back,
-  none may get through; finally `unlink <id prefix of a revoked c> --cascade` works.
+  none may get through; then `unlink <id prefix of a revoked c> --cascade` works; last,
+  with a newly linked c offline and b frozen 15 s, a's first `run b` takes at most ~7 s
+  and the next two under 1.5 s (one settling wait per absence).
 - `test/e2e/06-paths.sh` also asserts that a daemon restarted while the relay is down is
   reached again on the direct path (address hints), and `05-continuity.sh`'s driver
   reports for each disruption whether the stall line was shown.

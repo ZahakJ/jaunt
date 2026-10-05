@@ -41,8 +41,6 @@ const SETTLE_LIMIT: Duration = Duration::from_secs(5);
 const ABSENT_AFTER_MS: u64 = 60_000;
 /// The daemon's 1 s monitor not running for this long means it was frozen or suspended.
 const TICK_GAP_MS: u64 = 5_000;
-/// While unsettled, a request waits for a round that started at most this long before it.
-const ROUND_FRESH_MS: u64 = 2_000;
 /// While unsettled, the monitor starts a round on its own this often.
 const ROUND_BACKGROUND_MS: u64 = 30_000;
 /// How long a revoked peer's stream may still run so that the process it started gets the
@@ -112,18 +110,25 @@ pub struct Daemon {
 
 /// H1. A machine that comes back from an absence (daemon start, a freeze or suspend, or no
 /// contact with any member for a minute) may hold a roster that misses a revocation. From
-/// then on it is *unsettled*: it serves a peer's Shell, Exec, Tcp or Copy only once it has
-/// completed a Sync with a member other than that peer (a round that reached nobody settles
-/// nothing), or when no member other than that peer exists. While unsettled, each such
-/// request waits for a settling round (at most `SETTLE_LIMIT`) and is served after it, so
-/// what remains is exactly: no other member was reachable within 5 s of the request.
+/// then on it is *unsettled*: it serves a peer's Shell, Exec, Tcp, Copy or KillSessions
+/// only once it has completed a Sync with a member other than that peer, or when no member
+/// other than that peer exists. Otherwise the first such request waits for a settling round
+/// that started after the requester's connection was established (so the network was up
+/// while it ran; rounds during an outage do not count), at most `SETTLE_LIMIT`. If that
+/// round reached no other member, the machine is settled provisionally and serves without
+/// waiting until the next absence; the keepers go on dialling, and a tombstone that arrives
+/// later ends the revoked machine's connections and processes as usual. What remains: a
+/// revoked machine is served only if no informed member answered within 5 s of its first
+/// request, and then only until an informed member is reachable.
 struct Settle {
     state: Mutex<SettleState>,
     /// The most recently started settling round that is still running: its start (wall
     /// ms) and a receiver that turns true when it ends.
     current: Mutex<Option<(u64, watch::Receiver<bool>)>>,
-    /// Start of the most recently started round.
+    /// Start of the most recently started round, and the latest start of a round that
+    /// has completed.
     last_round_start: AtomicU64,
+    last_done_start: AtomicU64,
     /// Wall-clock ms of the monitor's last tick, of the last contact, and of the moment
     /// this machine was last settled.
     last_tick: AtomicU64,
@@ -157,6 +162,7 @@ impl Settle {
             state: Mutex::new(SettleState { unsettled_since: Some(now), synced: HashSet::new() }),
             current: Mutex::new(None),
             last_round_start: AtomicU64::new(0),
+            last_done_start: AtomicU64::new(0),
             last_tick: AtomicU64::new(now),
             last_contact: AtomicU64::new(now),
             last_settled: AtomicU64::new(0),
@@ -219,6 +225,31 @@ impl Settle {
 
     fn serves(&self, peer: &MachineId, others: &HashSet<MachineId>) -> bool {
         self.state.lock().map(|s| s.serves(peer, others)).unwrap_or(false)
+    }
+
+    fn unsettled_since(&self) -> Option<u64> {
+        self.state.lock().ok().and_then(|s| s.unsettled_since)
+    }
+
+    /// A settling round that started at `start` has completed.
+    fn round_done(&self, start: u64) {
+        self.last_done_start.fetch_max(start, Ordering::SeqCst);
+    }
+
+    /// A requester whose connection was established at `established`: if a round that
+    /// started at or after that moment (and after the absence began) has completed, the
+    /// network was up while it ran, so what it could not reach was not reachable. Become
+    /// settled provisionally (until the next absence). True when settled now.
+    fn settle_provisionally(&self, established: u64, now: u64) -> bool {
+        let Ok(mut s) = self.state.lock() else { return false };
+        let Some(since) = s.unsettled_since else { return true };
+        if self.last_done_start.load(Ordering::SeqCst) >= since.max(established) {
+            s.unsettled_since = None;
+            s.synced.clear();
+            self.last_settled.store(now, Ordering::Relaxed);
+            return true;
+        }
+        false
     }
 }
 
@@ -785,18 +816,28 @@ impl Daemon {
     // ---------------------------------------------------------------- streams (host side)
 
     async fn serve_conn(self: Arc<Self>, conn: Connection, id: MachineId) {
+        // H1: when this connection was established (it is adopted right after the
+        // handshake), so a settling round that started later ran with the network up.
+        let established = now_ms();
         while let Ok((send, recv)) = conn.accept_bi().await {
             let d = self.clone();
             let c = conn.clone();
             tokio::spawn(async move {
-                if let Err(e) = d.serve_stream(c, id, send, recv).await {
+                if let Err(e) = d.serve_stream(c, id, established, send, recv).await {
                     tracing::debug!("stream from {} ended: {e:#}", id.short());
                 }
             });
         }
     }
 
-    async fn serve_stream(self: Arc<Self>, conn: Connection, id: MachineId, mut send: SendStream, mut recv: RecvStream) -> Result<()> {
+    async fn serve_stream(
+        self: Arc<Self>,
+        conn: Connection,
+        id: MachineId,
+        established: u64,
+        mut send: SendStream,
+        mut recv: RecvStream,
+    ) -> Result<()> {
         let payload = timeout(HEADER_TIMEOUT, proto::expect_frame(&mut recv, FrameType::Header))
             .await
             .context("no request header within 10 s")??;
@@ -825,10 +866,10 @@ impl Daemon {
         }
         if !matches!(hello.service, Service::Sync | Service::Ping) {
             // H1: after an absence, nothing but Sync and Ping until this machine has
-            // synced with a member other than `id` (or a round for this request reached
-            // none); then ask again whether `id` is one.
-            if !self.wait_settled(id).await {
-                tracing::info!("serving {} while unsettled: no other member was reachable", id.short());
+            // synced with a member other than `id`, or a round that started after `id`'s
+            // connection was established reached none; then ask again whether `id` is one.
+            if !self.wait_settled(id, established).await {
+                tracing::info!("serving {} although settling did not finish in time", id.short());
             }
             if !self.is_member(&id) {
                 return self.refuse_logged(&id, &mut send, "not a member of this mesh").await;
@@ -1278,38 +1319,50 @@ impl Daemon {
             {
                 *g = None;
             }
+            d.settle.round_done(start);
             let _ = done_tx.send(true);
         });
         done_rx
     }
 
-    /// For a Shell, Exec, Tcp or Copy request from `peer`: while unsettled, wait for a
-    /// settling round that started at most 2 s before the request (joining the running one
-    /// if it is that fresh, else starting one) and serve after it. False when served
-    /// without having synced with a member other than `peer`.
-    async fn wait_settled(self: &Arc<Self>, peer: MachineId) -> bool {
-        let asked = now_ms();
-        if let Some(why) = self.settle.notice(asked) {
+    /// For a Shell, Exec, Tcp, Copy or KillSessions request from `peer` on a connection
+    /// established at `established`: while unsettled, wait (at most once per absence) for a
+    /// settling round that started at or after that moment and after the absence began,
+    /// joining a running one or starting one. A round that synced with a member other than
+    /// `peer` settles this machine; one that completed without reaching any settles it
+    /// provisionally (until the next absence). False only if no round finished in time.
+    async fn wait_settled(self: &Arc<Self>, peer: MachineId, established: u64) -> bool {
+        if let Some(why) = self.settle.notice(now_ms()) {
             self.begin_round(&why);
         }
-        if self.settle.serves(&peer, &self.others()) {
+        if self.settle.serves(&peer, &self.others()) || self.provisional(peer, established) {
             return true;
         }
-        let fresh = |start: u64| start.saturating_add(ROUND_FRESH_MS) >= asked;
+        let Some(since) = self.settle.unsettled_since() else { return true };
+        let after = since.max(established);
         let running = self
             .settle
             .current
             .lock()
             .ok()
-            .and_then(|g| g.as_ref().filter(|(start, _)| fresh(*start)).map(|(_, rx)| rx.clone()));
+            .and_then(|g| g.as_ref().filter(|(start, _)| *start >= after).map(|(_, rx)| rx.clone()));
         let mut rx = match running {
             Some(rx) => rx,
-            // A fresh round already ended (it reached nobody but `peer`, or nobody).
-            None if fresh(self.settle.last_round_start.load(Ordering::Relaxed)) => return false,
             None => self.begin_round(&format!("a request from {} while unsettled", self.name_of(&peer))),
         };
         let _ = timeout(SETTLE_LIMIT + Duration::from_secs(1), rx.wait_for(|done| *done)).await;
-        self.settle.serves(&peer, &self.others())
+        self.settle.serves(&peer, &self.others()) || self.provisional(peer, established)
+    }
+
+    fn provisional(&self, peer: MachineId, established: u64) -> bool {
+        let ok = self.settle.settle_provisionally(established, now_ms());
+        if ok {
+            tracing::warn!(
+                "settled provisionally: a settling round since {}'s connection reached no other member; serving until the next absence",
+                self.name_of(&peer)
+            );
+        }
+        ok
     }
 
     /// Once a second: notice a freeze or suspend (the tick came late) or a long silence,
@@ -1682,7 +1735,7 @@ mod tests {
         assert!(!s.is_settled(), "a daemon start is an absence");
         assert!(!s.serves(&c, &others));
         round_ends(&s, &others, t0 + 5_000);
-        assert!(!s.is_settled(), "a round that reached nobody settles nothing");
+        assert!(!s.is_settled(), "a round that reached nobody settles nothing by itself");
         s.synced(c, &others, t0 + 5_100);
         assert!(!s.serves(&c, &others), "a sync with the requester itself does not count for it");
         assert!(s.serves(&a, &others), "but it does for any other requester");
@@ -1704,24 +1757,48 @@ mod tests {
         let t1 = t0 + 20_100;
         s.last_tick.store(t1, Ordering::Relaxed);
         let mut became = 0;
-        for k in 1..=300 {
+        for k in 1..=90 {
             let now = t1 + k * 1_000;
             if s.notice(now).is_some() {
                 became += 1;
                 assert!(now - t1 > ABSENT_AFTER_MS);
             }
             if k % 5 == 0 {
+                // Background rounds during the outage: they start and end reaching nobody.
                 round_ends(&s, &others, now);
+                s.round_done(now - 5_000);
             }
         }
         assert_eq!(became, 1, "one absence, noticed once");
         assert!(!s.is_settled() && !s.serves(&c, &others), "rounds that reached nobody and time alone settle nothing");
-        // The network returns; c is the first to talk to b (pings, even a sync).
-        s.last_contact.store(t1 + 301_000, Ordering::Relaxed);
-        s.synced(c, &others, t1 + 301_000);
+        // The network returns at t1 + 91 s; c connects at once. The rounds that ran during
+        // the outage started before c's connection: they do not count for it.
+        let c_conn = t1 + 91_000;
+        assert!(!s.settle_provisionally(c_conn, c_conn + 10), "rounds from before the requester's connection do not count");
+        assert!(!s.is_settled());
+        // c's first request starts a round; a answers within it: settled, c refused later.
+        s.synced(c, &others, c_conn + 50);
         assert!(!s.serves(&c, &others), "contact with c alone does not let c in");
-        s.synced(a, &others, t1 + 302_000);
+        s.synced(a, &others, c_conn + 900);
         assert!(s.serves(&c, &others) && s.is_settled());
+
+        // Provisional: after a freeze, the first request's round (started after its
+        // connection) reaches no other member: settled until the next absence, and the
+        // second request is served without waiting.
+        let t2 = c_conn + 10_000;
+        s.last_tick.store(t2, Ordering::Relaxed);
+        assert!(s.notice(t2 + TICK_GAP_MS + 1_000).is_some());
+        let a_conn = t2 - 20_000; // a's connection survived the freeze
+        assert!(!s.serves(&a, &others) && !s.settle_provisionally(a_conn, t2 + 6_100), "no round since the absence yet");
+        s.round_done(t2 + 6_500); // started after the absence (t2 + 6 s), reached nobody
+        round_ends(&s, &others, t2 + 12_000);
+        assert!(!s.is_settled(), "not fully settled by the round alone");
+        assert!(s.settle_provisionally(a_conn, t2 + 12_001), "the first request is then served");
+        assert!(s.is_settled() && s.serves(&a, &others) && s.serves(&c, &others), "the second request needs no wait");
+        let t3 = t2 + 40_000;
+        s.last_tick.store(t3, Ordering::Relaxed);
+        assert!(s.notice(t3 + TICK_GAP_MS + 1).is_some(), "the next absence ends the provisional state");
+        assert!(!s.serves(&a, &others) && !s.settle_provisionally(a_conn, t3 + TICK_GAP_MS + 2));
 
         // Nobody else to ask: the only other member is the requester, or there is none.
         let only_c: HashSet<MachineId> = [c].into();

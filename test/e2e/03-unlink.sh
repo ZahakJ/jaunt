@@ -7,7 +7,8 @@
 # is printed). The moment b thaws, c tries to run a command on b five times: none may get
 # through (b settles with a before serving anyone after an absence). b learns of it; the
 # time that takes is printed. Phase 3 does the same three times with b's network cut for
-# 90 s while its daemon keeps running (no freeze to notice).
+# 90 s while its daemon keeps running (no freeze to notice). Last, with c offline, only
+# the first command after an absence of b waits for settling.
 #   JAUNT_BIN=target/release/jaunt test/e2e/03-unlink.sh       (KEEP_HARNESS=1 leaves it up)
 set -uo pipefail
 E2E_NAME=03-unlink
@@ -181,6 +182,26 @@ h_jaunt a unlink "${C_ID:0:8}" --cascade > "$OUT-cascade-revoked.out" 2>&1
 check "a: unlink <id of a revoked c> --cascade works" [ $? = 0 ]
 sed 's/^/    a| /' "$OUT-cascade-revoked.out" | head -3
 check "a: it says c had been unlinked before" grep -q "had been unlinked before" "$OUT-cascade-revoked.out"
+# The cost of settling, once per absence: c is linked again and then offline; b is frozen
+# 15 s. a's first command on b may wait for one settling round (c does not answer, so up to
+# 5 s); the round ran with the network up, so b is then settled provisionally and the next
+# commands do not wait.
+note "timing: c offline, b frozen 15 s; a runs three commands on b"
+check "timing: c fresh (new key)" h_fresh c
+check "timing: link a <- c" h_link a c
+check "timing: a, b, c all connected" wait_until 120 all_connected
+h_daemon_stop c
+"$HARNESS/jh" freeze b 15 > "$OUT-freeze-timing.log" 2>&1
+T=(); R=()
+for i in 1 2 3; do
+  t=$(date +%s%N); h_jaunt a run b -- true >/dev/null 2>&1; R+=($?)
+  T+=($(( ($(date +%s%N) - t) / 1000000 )))
+  note "a: run b #$i took ${T[$((i - 1))]} ms (exit ${R[$((i - 1))]})"
+done
+check "timing: all three runs succeed" [ "${R[*]}" = "0 0 0" ]
+check "timing: the first run after b's freeze takes at most ~6 s (${T[0]} ms)" [ "${T[0]}" -le 7000 ]
+check "timing: the second run does not wait (${T[1]} ms)" [ "${T[1]}" -lt 1500 ]
+check "timing: the third run does not wait (${T[2]} ms)" [ "${T[2]}" -lt 1500 ]
 h_save_logs
 for m in a b; do note "jaunt ls on $m"; h_jaunt "$m" ls | cut -f1-5 | sed 's/^/    /'; done
 
