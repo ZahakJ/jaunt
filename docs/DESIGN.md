@@ -7,8 +7,8 @@ this file is silent on a detail, those files decide.
 ## 1. What it is
 
 `jaunt` links a handful of machines that belong to one person and lets them sit at any one
-and work on any other: `jaunt fern` drops you into a persistent tmux session on the machine
-called fern, over a direct encrypted peer-to-peer path when one can be made and through a
+and work on any other: `jaunt toluene` drops you into a persistent tmux session on the machine
+called toluene, over a direct encrypted peer-to-peer path when one can be made and through a
 relay you host when it cannot. One static binary per machine, no root, no accounts, no
 third-party service.
 
@@ -236,14 +236,14 @@ connection, the client, and the daemon. The client side:
 - A network change (Wi-Fi to hotspot) is absorbed by QUIC migration; nothing visible
   happens beyond the path indicator.
 - When the connection is lost (lid closed, long outage), the client keeps the terminal,
-  shows one status line (`fern ╌ link lost · retrying · ~. to give up`), retries with
+  shows one status line (`toluene ╌ link lost · retrying · ~. to give up`), retries with
   backoff, and re-attaches when the machine is back; tmux repaints the screen.
 - `Enter ~ .` disconnects (session kept), `Enter ~ ?` lists escapes, as in OpenSSH.
 - Without tmux on the host the hop is a plain login shell and jaunt says it will not
   survive a disconnect.
 
-**Onward hops.** Each machine is a full member, so `jaunt moss` typed inside a session on
-fern hops onward from fern; from the first machine you can also hop to moss directly in
+**Onward hops.** Each machine is a full member, so `jaunt xylene` typed inside a session on
+toluene hops onward from toluene; from the first machine you can also hop to xylene directly in
 another window. The remote shell gets `JAUNT_FROM=<name>` and `JAUNT_MACHINE=<name>`.
 
 **tmux fit** (`contrib/tmux/jaunt.tmux`, optional, installed by `jaunt tmux-setup` into
@@ -325,12 +325,12 @@ The terminal presence is a requirement. Principles:
   log underneath (handshakes, path upgrades relay→direct, roams, syncs, link/unlink). A
   key bar at the bottom. Degrades cleanly to 80×24 and to narrow panes (tmux popup).
 - **`jaunt ls`**: the same information as a static, screenshot-worthy block.
-- **Hop**: a one-line banner on the way in (`forge ━━▸ fern · direct · 0.8 ms`) and on the
-  way out (`◂━━ back on forge · session kept on fern`).
+- **Hop**: a one-line banner on the way in (`benzene ━━▸ toluene · direct · 0.8 ms`) and on the
+  way out (`◂━━ back on benzene · session kept on toluene`).
 - **Pairing ritual**: two nodes with a gap between them; the code shown large and
   speakable; steps tick as they happen (rendezvous, key exchange, identities sealed);
   the link closes with a pulse; the sigil and three words appear on both; then the roster
-  fan-out (`told moss ✓ tin …`).
+  fan-out (`told xylene ✓ phenol …`).
 - Looks are verified from real captures (rendered to PNG from terminal output at 80×24
   and 120×36, truecolor and 16-colour and no-colour) and iterated.
 

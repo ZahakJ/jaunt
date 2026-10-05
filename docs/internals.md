@@ -79,7 +79,7 @@ request per connection. Requests (`IpcRequest`, tagged by `op`):
 | --- | --- |
 | `{"op":"status"}` | `{"kind":"status", ...StatusSnapshot}` |
 | `{"op":"subscribe","history":N}` | `status` snapshot, then up to N past `event`s (oldest first, max 500), then live `event` and `rtt` messages until the client closes; after a lag a fresh `status` |
-| `{"op":"open","target":"fern","service":{...}}` | `{"kind":"opened","peer":{id,name},"path":"direct"\|"relay"\|"unknown","rtt_ms":0.8}` and from then on the socket carries the QUIC stream's frames verbatim (both directions; closing the socket ends the stream); or `{"kind":"error","message":...}` |
+| `{"op":"open","target":"toluene","service":{...}}` | `{"kind":"opened","peer":{id,name},"path":"direct"\|"relay"\|"unknown","rtt_ms":0.8}` and from then on the socket carries the QUIC stream's frames verbatim (both directions; closing the socket ends the stream); or `{"kind":"error","message":...}` |
 | `{"op":"add_peer","id":"<64 hex>","name":"b"}` | `ok` / `error` (test bootstrap: `jaunt debug add-peer`; refused unless the daemon runs under `JAUNT_HOME`) |
 | `{"op":"quiet","id":"<64 hex>"}` | `{"kind":"quiet","quiet_ms":N\|null}`: ms since any datagram (data, acks, keep-alives) arrived from that peer on its live connection; `null` without one. The hop client asks it when typed input has had no answer for 3 s |
 | `{"op":"rename","name":"x"}` | `ok` / `error` |
@@ -97,7 +97,7 @@ id-hex prefix (≥ 4 chars); this machine is never a target. Errors say "could m
 For `unlink` with `cascade` or `kill_sessions`, a target that matches no member is looked
 up among revoked machines the same way (their entries, with the name, stay in the roster;
 a tombstone without an entry is found by id prefix; same-named revoked machines are told
-apart by id), so `jaunt unlink fern --cascade` still works after fern was unlinked; the
+apart by id), so `jaunt unlink toluene --cascade` still works after toluene was unlinked; the
 report then lists it in `already_revoked`. Without those flags it says the machine is
 already unlinked.
 
@@ -330,7 +330,7 @@ The daemon is never started by `check`.
   1–10 s; `~.` gives up during retry too. While the stream is up, typed input that has
   had no output back for 3 s makes the client ask the daemon (`quiet`) whether anything at
   all (data, acks, keep-alives) arrived from the machine in the last 3 s; if not, the
-  bottom row shows `fern ╌ no answer for Ns · waiting for the link · ~. to give up` until
+  bottom row shows `toluene ╌ no answer for Ns · waiting for the link · ~. to give up` until
   output arrives (then the remote screen is redrawn). A quiet program (a password prompt)
   on a live link shows nothing.
 - Strings from other machines (refusal reasons, ping facts, notices, abort reasons, error

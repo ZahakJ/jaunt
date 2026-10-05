@@ -21,18 +21,43 @@ other machine gets it through the roster, or from `install.sh --relay URL` /
 `jaunt join --relay URL`). Check it with `jaunt check`; it reports whether the relay
 answers and whether UDP address discovery worked.
 
+## Do I have to pay? Which option?
+
+You need **one** relay for the whole mesh, however many machines you have. It is a small
+program (about 20 MB of memory) and it can run for free. What you choose decides whether
+machines on different networks get a direct path or go through the relay.
+
+| Where the relay runs | Cost | Direct paths between different networks | New exposure |
+| --- | --- | --- | --- |
+| **A. Your desktop, behind the Cloudflare tunnel you already have** | free | **no**: away from home every session is relayed (Cloudflare, then the desktop), about as fast as SSH is today. On the same LAN a direct path is expected (untested) | none |
+| **B. Your desktop, with two ports forwarded on the home router** | free | yes | your home IP address is published in DNS and the router forwards 443/tcp and 7842/udp to the desktop |
+| **C. A small VPS** (recommended) | about 4 to 6 US dollars a month, or nothing on a provider's free tier | yes | none at home |
+| **D. Fly.io** | a dedicated IPv4 address is a paid extra | **not as shipped** (see below) | none at home |
+
+A sensible order: start with **A** (free, nothing new exposed, good enough to try jaunt and
+to use it at home), and move to **C** when you want direct paths from outside. Changing
+relay later is one command (`jaunt relay set NEW_URL`); every machine that is online picks it
+up, so keep the old relay running until `jaunt ls` has shown each machine once.
+
+Why the difference: a machine behind a home router does not know its own public address.
+The relay tells it, over **UDP port 7842**, and two machines that know their public
+addresses can then punch a direct path. A relay that cannot receive UDP from the internet
+(option A: a Cloudflare hostname carries only HTTP) still relays, but nobody learns their
+public address, so nothing goes direct across networks.
+
+Nothing here has been deployed or run on a real server; see "What was tested" at the end.
+
 Files here: `Dockerfile` (builds iroh-relay 1.3.0 from crates.io in debian:12, runs it in
 debian:12-slim as an unprivileged user), `relay.toml` (Let's Encrypt, address discovery on),
 `fly.toml`.
 
-## Option 1: a small VPS (recommended)
+## Option C: a small VPS (recommended)
 
-Any Linux VPS with a public IPv4 address. The smallest plan at the usual providers is
-enough (the relay idles at about 20 MB of RAM); expect roughly 4 to 6 US dollars a month.
-Prices change; check the provider's page. Traffic is small unless most sessions are
-relayed.
+Any Linux VPS with a public IPv4 address. The smallest plan is enough. Traffic is small
+unless most sessions are relayed.
 
 1. Point a DNS name at the VPS (A record, plus AAAA if it has IPv6): `relay.example.net`.
+   On Cloudflare DNS set the record to "DNS only" (grey cloud), not proxied.
 2. Open 80/tcp, 443/tcp and 7842/udp in the provider's firewall and on the host.
 3. Copy this directory to the VPS, edit `relay.toml` (`hostname`, `contact`), then:
 
@@ -50,32 +75,47 @@ relayed.
    server --locked`, the same config, and a systemd unit with
    `AmbientCapabilities=CAP_NET_BIND_SERVICE`.
 
-## Option 2: Fly.io (not recommended)
+## Option B: the desktop, with ports forwarded on the home router
 
-**Fly.io is not recommended for this relay, and the files here do not make it work.** On
-Fly, UDP reaches an app only on a socket bound to the address of `fly-global-services`
-(inside the machine), and replies must leave from that same socket. iroh-relay 1.3.0
-binds its QUIC address-discovery socket to the literal `quic_bind_addr` in its config; it
-cannot be given a host name. As shipped (`[::]:7842`) the relay gets no UDP on Fly at all,
-so address discovery fails and **every session between machines behind NAT is relayed**.
+The same relay as option C, running on the always-on desktop. Free, and it gives direct
+paths, but it undoes part of what the Cloudflare tunnel was for: the home IP address
+becomes public and the router lets traffic in.
 
-The only way to bind it there would be a start script that resolves
-`fly-global-services` inside the machine and writes that address into `quic_bind_addr`
-before starting iroh-relay. That is not done here and has not been tried. Community
-reports (Aug–Sep 2026) also describe UDP replies leaving from a different IP and packets
-not arriving, either of which breaks address discovery even when bound correctly, and
-Let's Encrypt through Fly's raw TCP services was not tried either.
+It needs: a public IPv4 address at home (not carrier-grade NAT; if the router's WAN address
+differs from what a "what is my IP" site shows, this option is out); a router where you
+can forward 80/tcp, 443/tcp and 7842/udp to the desktop; a DNS name pointing at the home
+address, set to "DNS only", and kept up to date if the address changes. Then follow option
+C's step 3 on the desktop (check `ss -ltn` first: 80 and 443 must be free there).
 
-`fly.toml` is kept as a starting point for someone who wants to do that work (a dedicated
-IPv4, `fly ips allocate-v4`, is needed for UDP at all). If you try it, check it the same
-way as any relay: `jaunt check` on two machines behind different NATs must report that
-UDP address discovery works, and `jaunt ls` must show them `direct`. If they stay
-`relay`, it is not working. Use a VPS (Option 1) instead.
+Not tried. One known catch: laptops at home reach the relay through the router's public
+address, which only works if the router supports "NAT loopback" (hairpin NAT).
 
-## Option 3: the desktop, behind the existing Cloudflare tunnel (fallback only)
+## Option D: Fly.io (does not work as shipped)
 
-Run the relay in plain HTTP on the desktop and let the tunnel carry it. Costs nothing
-extra. **Machines behind NAT will not find direct paths through it**: address discovery
+Fly.io is not ruled out for good; it needs work that has not been done or tested.
+
+- **What goes wrong.** On Fly, UDP reaches an app only on a socket bound to a special
+  internal address (the one the name `fly-global-services` resolves to inside the
+  machine). iroh-relay 1.3.0 binds its UDP socket to the literal address in its config
+  (`quic_bind_addr`, here `[::]:7842`) and cannot be given a name. So with the files here
+  the relay on Fly receives **no UDP**. It still relays over HTTPS, but no machine learns
+  its public address, and nothing goes direct: the same result as option A, which is free.
+- **What would fix it.** A start script in the container that looks up
+  `fly-global-services` and writes that address into `quic_bind_addr` before starting
+  iroh-relay, plus a dedicated IPv4 address for the app (`fly ips allocate-v4`, a paid
+  extra, required for UDP). That script is not written and has not been tried.
+- **Why it may still not work.** Reports from August and September 2026 describe UDP
+  replies on Fly leaving from a different address and packets not arriving; either breaks
+  address discovery even with the right binding. Let's Encrypt through Fly's raw TCP
+  services was not tried either.
+
+`fly.toml` is kept as a starting point. If you try it, the test is the same as for any
+relay: `jaunt check` on two machines behind different routers must say UDP address
+discovery works, and `jaunt ls` must show them `direct`.
+
+## Option A: the desktop, behind the existing Cloudflare tunnel (free)
+
+Run the relay in plain HTTP on the desktop and let the tunnel carry it. Costs nothing. **Machines behind NAT will not find direct paths through it**: address discovery
 needs UDP to the relay's own host name, and a Cloudflare hostname carries no UDP. Every
 session between two NATed machines is relayed through Cloudflare's edge and the desktop;
 a machine on the desktop's own LAN, or one with a public IPv6 address, may still go
