@@ -65,7 +65,7 @@ fn path_style(path: PathKind) -> (char, Style) {
     }
 }
 
-/// On the way in: `forge ━━▸ fern · direct · 0.8 ms`.
+/// On the way in: `benzene ━━▸ toluene · direct · 0.8 ms`.
 pub fn hop_banner_in(me: &str, peer: &str, path: PathKind, rtt_ms: Option<f64>) -> String {
     let g = glyphs();
     let (line, st) = path_style(path);
@@ -85,7 +85,7 @@ pub fn hop_banner_in(me: &str, peer: &str, path: PathKind, rtt_ms: Option<f64>) 
     s
 }
 
-/// On the way out: `◂━━ back on forge · session kept on fern`.
+/// On the way out: `◂━━ back on benzene · session kept on toluene`.
 pub fn hop_banner_out(me: &str, peer: &str, session_kept: bool) -> String {
     let g = glyphs();
     let head = format!(
@@ -136,10 +136,10 @@ mod tests {
     #[test]
     fn banners_carry_the_facts() {
         // Colour depends on the environment; the words must be there either way.
-        let b = hop_banner_in("forge", "fern", PathKind::Direct, Some(0.84));
-        assert!(b.contains("forge") && b.contains("fern") && b.contains("direct") && b.contains("0.8 ms"));
-        let b = hop_banner_out("forge", "fern", true);
+        let b = hop_banner_in("benzene", "toluene", PathKind::Direct, Some(0.84));
+        assert!(b.contains("benzene") && b.contains("toluene") && b.contains("direct") && b.contains("0.8 ms"));
+        let b = hop_banner_out("benzene", "toluene", true);
         assert!(b.contains("back on") && b.contains("session kept on"));
-        assert!(link_lost_line("fern\x1b", 4).contains("fern?"));
+        assert!(link_lost_line("toluene\x1b", 4).contains("toluene?"));
     }
 }

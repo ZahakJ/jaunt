@@ -191,7 +191,9 @@ fn detail(c: &mut Canvas, y: u16, m: &Mesh, sel: usize, now_ms: u64) {
 
 fn events(c: &mut Canvas, x1: u16, y0: u16, rows: u16, m: &Mesh, now_ms: u64) {
     let g = glyphs();
-    let name_w = m.log.iter().take(rows as usize).map(|l| l.who().len()).chain(m.peers.iter().map(|p| p.name.len())).max().unwrap_or(4).clamp(4, 12) as u16;
+    // Room for two seven-letter names ("toluene,xylene") when the panel is wide enough.
+    let cap = if x1 >= 60 { 14 } else { 12 };
+    let name_w = m.log.iter().take(rows as usize).map(|l| l.who().len()).chain(m.peers.iter().map(|p| p.name.len())).max().unwrap_or(4).clamp(4, cap) as u16;
     for (i, l) in m.log.iter().take(rows as usize).enumerate() {
         let y = y0 + i as u16;
         let age = fmt_age(now_ms.saturating_sub(l.t_ms));

@@ -58,17 +58,17 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Open a session: `jaunt hop fern[:session]` (same as `jaunt fern`).
+    /// Open a session: `jaunt hop toluene[:session]` (same as `jaunt toluene`).
     Hop { target: String },
-    /// Run one command on a machine: `jaunt run fern -- uname -a`.
+    /// Run one command on a machine: `jaunt run toluene -- uname -a`.
     Run {
         machine: String,
         #[arg(last = true, required = true)]
         argv: Vec<String>,
     },
-    /// Copy files or directories; one side is machine:path (`jaunt cp notes.txt fern:docs/`).
+    /// Copy files or directories; one side is machine:path (`jaunt cp notes.txt toluene:docs/`).
     Cp { src: String, dst: String },
-    /// Forward a local port to a machine's loopback: `jaunt fwd fern 8080[:9090]`. The local
+    /// Forward a local port to a machine's loopback: `jaunt fwd toluene 8080[:9090]`. The local
     /// end listens on 127.0.0.1, so every user of this machine can use it while it runs
     /// (as with ssh -L); on a shared machine forward only what anyone here may reach.
     Fwd {

@@ -712,7 +712,7 @@ mod tests {
         let line = plain_finish(false, msg);
         assert!(!line.chars().any(|c| c.is_control()), "{line:?}");
         assert!(line.starts_with("jaunt: the other machine stopped"));
-        assert_eq!(plain_finish(true, "linked fern"), "linked fern");
+        assert_eq!(plain_finish(true, "linked toluene"), "linked toluene");
     }
 
     /// PAIR-2: the inviter's screen must not tell the owner to put the code in argv on the

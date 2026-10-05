@@ -573,14 +573,14 @@ mod tests {
             last_error: None,
         };
         StatusSnapshot {
-            me: PeerRef { id: MachineId([9; 32]), name: "forge".into() },
+            me: PeerRef { id: MachineId([9; 32]), name: "benzene".into() },
             version: "0.1.0".into(),
             daemon_pid: 1,
             started_at_ms: 0,
             relays: vec!["https://relay.example.net/x".into()],
             relay_connected: true,
             bound: vec![],
-            peers: vec![peer(2, "moss", PeerState::Relay), peer(1, "fern", PeerState::Direct)],
+            peers: vec![peer(2, "xylene", PeerState::Relay), peer(1, "toluene", PeerState::Direct)],
             revoked: vec![],
             host: None,
         }
@@ -590,7 +590,7 @@ mod tests {
     fn status_is_cleaned_and_sorted() {
         let mut m = Mesh::default();
         m.apply_status(&snap());
-        assert_eq!(m.peers[0].name, "fern");
+        assert_eq!(m.peers[0].name, "toluene");
         assert_eq!(m.peers[0].rtt_ms, None);
         assert!(!m.peers[0].addr.as_deref().unwrap_or("").contains('\x1b'));
         assert_eq!(m.peers[0].host, None);
@@ -601,8 +601,8 @@ mod tests {
     fn events_move_state_and_log_newest_first() {
         let mut m = Mesh::default();
         m.apply_status(&snap());
-        let moss = PeerRef { id: MachineId([2; 32]), name: "moss".into() };
-        let ev = |seq, t_ms, kind| Event { seq, t_ms, peer: Some(moss.clone()), kind };
+        let xylene = PeerRef { id: MachineId([2; 32]), name: "xylene".into() };
+        let ev = |seq, t_ms, kind| Event { seq, t_ms, peer: Some(xylene.clone()), kind };
         m.apply_event(&ev(1, 100, EventKind::PathChanged { from: PathKind::Relay, to: PathKind::Direct, remote_addr: None }), 100, true);
         // The upgrade redraws the line (the relay waypoint lifts off) instead of a pulse.
         assert!(m.peers[1].morph.is_some() && m.pulses.is_empty());
@@ -623,16 +623,16 @@ mod tests {
     fn routine_lines_fold_and_settling_is_not_an_alarm() {
         let mut m = Mesh::default();
         m.apply_status(&snap());
-        let fern = PeerRef { id: MachineId([1; 32]), name: "fern".into() };
-        let moss = PeerRef { id: MachineId([2; 32]), name: "moss".into() };
+        let toluene = PeerRef { id: MachineId([1; 32]), name: "toluene".into() };
+        let xylene = PeerRef { id: MachineId([2; 32]), name: "xylene".into() };
         let ev = |t_ms, p: &PeerRef, kind| Event { seq: 0, t_ms, peer: Some(p.clone()), kind };
         let sync = || EventKind::Sync { changed: false, outgoing: true };
-        m.apply_event(&ev(1000, &fern, sync()), 1000, false);
-        m.apply_event(&ev(2000, &moss, sync()), 2000, false);
-        m.apply_event(&ev(3000, &fern, EventKind::Served { service: "exec".into() }), 3000, false);
-        m.apply_event(&ev(4000, &fern, sync()), 4000, false);
+        m.apply_event(&ev(1000, &toluene, sync()), 1000, false);
+        m.apply_event(&ev(2000, &xylene, sync()), 2000, false);
+        m.apply_event(&ev(3000, &toluene, EventKind::Served { service: "exec".into() }), 3000, false);
+        m.apply_event(&ev(4000, &toluene, sync()), 4000, false);
         assert_eq!(m.log.len(), 2, "{:?}", m.log);
-        assert_eq!((m.log[0].count, m.log[0].who()), (3, "fern,moss".to_string()));
+        assert_eq!((m.log[0].count, m.log[0].who()), (3, "toluene,xylene".to_string()));
         assert_eq!(m.log[0].tone, Tone::Quiet);
 
         // A link being formed: up, refused (the other side does not know us yet), up again.
@@ -640,13 +640,13 @@ mod tests {
         m.apply_status(&snap());
         let up = |incoming| EventKind::Handshake { incoming, path: PathKind::Relay };
         let refused = || EventKind::Disconnected { reason: "closed by the other side: not a member of this mesh".into() };
-        m.apply_event(&ev(1000, &moss, up(false)), 1000, false);
-        m.apply_event(&ev(1100, &moss, refused()), 1100, false);
-        m.apply_event(&ev(1500, &moss, up(false)), 1500, false);
-        m.apply_event(&ev(1600, &moss, refused()), 1600, false);
+        m.apply_event(&ev(1000, &xylene, up(false)), 1000, false);
+        m.apply_event(&ev(1100, &xylene, refused()), 1100, false);
+        m.apply_event(&ev(1500, &xylene, up(false)), 1500, false);
+        m.apply_event(&ev(1600, &xylene, refused()), 1600, false);
         assert_eq!(m.log.len(), 1);
         assert_eq!((m.log[0].verb.as_str(), m.log[0].tone, m.log[0].count), ("settling", Tone::Quiet, 2));
-        m.apply_event(&ev(2000, &moss, up(true)), 2000, false);
+        m.apply_event(&ev(2000, &xylene, up(true)), 2000, false);
         assert_eq!(m.log.len(), 1);
         assert_eq!(m.log[0].verb, "link up");
         assert!(m.log[0].detail.iter().any(|(t, _)| t.contains("after 2 retries")));
@@ -655,10 +655,10 @@ mod tests {
         // H8: what the daemon sends now: one quiet refusal, then the link once it synced.
         let mut m = Mesh::default();
         m.apply_status(&snap());
-        let refused_once = EventKind::DialFailed { error: "moss refuses this machine as not a member there (it may not know of it yet)".into() };
-        m.apply_event(&ev(1000, &moss, refused_once), 1000, false);
+        let refused_once = EventKind::DialFailed { error: "xylene refuses this machine as not a member there (it may not know of it yet)".into() };
+        m.apply_event(&ev(1000, &xylene, refused_once), 1000, false);
         assert_eq!((m.log.len(), m.log[0].verb.as_str(), m.log[0].tone), (1, "settling", Tone::Quiet));
-        m.apply_event(&ev(3000, &moss, up(false)), 3000, false);
+        m.apply_event(&ev(3000, &xylene, up(false)), 3000, false);
         assert_eq!(m.log.len(), 1);
         assert_eq!(m.log[0].verb, "link up");
         assert!(m.log[0].detail.iter().any(|(t, _)| t.contains("after 1 retry")));

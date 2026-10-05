@@ -391,8 +391,8 @@ mod tests {
 
     #[test]
     fn remote_specs() {
-        assert_eq!(split_remote("fern:/etc/hosts"), Some(("fern", "/etc/hosts")));
-        assert_eq!(split_remote("fern:"), Some(("fern", "")));
+        assert_eq!(split_remote("toluene:/etc/hosts"), Some(("toluene", "/etc/hosts")));
+        assert_eq!(split_remote("toluene:"), Some(("toluene", "")));
         assert_eq!(split_remote("./a:b"), None);
         assert_eq!(split_remote("/tmp/x"), None);
         assert_eq!(split_remote(":x"), None);

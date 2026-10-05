@@ -739,9 +739,9 @@ mod tests {
 
     #[test]
     fn ipc_json_shape() {
-        let r = IpcRequest::Open { target: "fern".into(), service: Service::Ping };
+        let r = IpcRequest::Open { target: "toluene".into(), service: Service::Ping };
         let s = serde_json::to_string(&r).unwrap();
-        assert_eq!(s, r#"{"op":"open","target":"fern","service":{"kind":"ping"}}"#);
+        assert_eq!(s, r#"{"op":"open","target":"toluene","service":{"kind":"ping"}}"#);
         let e = Event { seq: 1, t_ms: 2, peer: None, kind: EventKind::Sync { changed: true, outgoing: false } };
         let s = serde_json::to_string(&IpcResponse::Event(e.clone())).unwrap();
         let back: IpcResponse = serde_json::from_str(&s).unwrap();

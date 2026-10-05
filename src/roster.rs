@@ -520,11 +520,11 @@ mod tests {
     }
 
     fn samples() -> Vec<Roster> {
-        let mut f1 = roster(&[entry(1, "fern", 10, 1)], &[]);
+        let mut f1 = roster(&[entry(1, "toluene", 10, 1)], &[]);
         f1.fleet = Fleet { relays: vec!["https://r1.example".into()], updated_at: 5, updated_by: Some(id(1)) };
-        let mut f2 = roster(&[entry(2, "moss", 20, 1), entry(1, "fern2", 30, 2)], &[(3, 40, 2)]);
+        let mut f2 = roster(&[entry(2, "xylene", 20, 1), entry(1, "toluene2", 30, 2)], &[(3, 40, 2)]);
         f2.fleet = Fleet { relays: vec!["https://r2.example".into()], updated_at: 7, updated_by: Some(id(2)) };
-        let f3 = roster(&[entry(3, "tin", 15, 1), entry(2, "moss", 20, 1)], &[(3, 35, 1), (1, 50, 3)]);
+        let f3 = roster(&[entry(3, "phenol", 15, 1), entry(2, "xylene", 20, 1)], &[(3, 35, 1), (1, 50, 3)]);
         vec![Roster::default(), f1, f2, f3]
     }
 
@@ -557,15 +557,15 @@ mod tests {
 
     #[test]
     fn tombstone_wins_and_is_permanent() {
-        let mut a = roster(&[entry(1, "fern", 10, 1), entry(2, "moss", 10, 1)], &[]);
+        let mut a = roster(&[entry(1, "toluene", 10, 1), entry(2, "xylene", 10, 1)], &[]);
         assert!(a.is_member(&id(2)));
         assert!(a.revoke(id(2), id(1), 100));
         assert!(!a.is_member(&id(2)));
         // a later re-add from a peer who never heard of the revocation does not resurrect it
-        let stale = roster(&[Entry { named_at: 500, ..entry(2, "moss", 400, 3) }], &[]);
+        let stale = roster(&[Entry { named_at: 500, ..entry(2, "xylene", 400, 3) }], &[]);
         a.merge(&stale);
         assert!(!a.is_member(&id(2)));
-        assert!(a.add(id(2), "moss", id(1), 600).is_err());
+        assert!(a.add(id(2), "xylene", id(1), 600).is_err());
         // earliest tombstone kept
         let later = roster(&[], &[(2, 900, 3)]);
         a.merge(&later);
@@ -575,7 +575,7 @@ mod tests {
 
     #[test]
     fn rename_propagates_by_named_at() {
-        let mut a = roster(&[entry(1, "fern", 10, 1)], &[]);
+        let mut a = roster(&[entry(1, "toluene", 10, 1)], &[]);
         let mut b = a.clone();
         assert!(b.rename(id(1), "bracken", 20).unwrap());
         assert!(a.merge(&b));
@@ -616,30 +616,30 @@ mod tests {
 
     #[test]
     fn name_collisions_are_disambiguated() {
-        let r = roster(&[entry(0xab, "fern", 10, 1), entry(0x12, "fern", 20, 1), entry(3, "moss", 5, 1)], &[]);
+        let r = roster(&[entry(0xab, "toluene", 10, 1), entry(0x12, "toluene", 20, 1), entry(3, "xylene", 5, 1)], &[]);
         let names = r.display_names();
-        assert_eq!(names[&id(0xab)], "fern");
-        assert_eq!(names[&id(0x12)], "fern-1212");
-        assert_eq!(names[&id(3)], "moss");
-        assert_eq!(r.resolve("fern", None), Resolve::Found(id(0xab)));
-        assert_eq!(r.resolve("fern-1", None), Resolve::Found(id(0x12)));
-        match r.resolve("fe", None) {
+        assert_eq!(names[&id(0xab)], "toluene");
+        assert_eq!(names[&id(0x12)], "toluene-1212");
+        assert_eq!(names[&id(3)], "xylene");
+        assert_eq!(r.resolve("toluene", None), Resolve::Found(id(0xab)));
+        assert_eq!(r.resolve("toluene-1", None), Resolve::Found(id(0x12)));
+        match r.resolve("to", None) {
             Resolve::Ambiguous(v) => assert_eq!(v.len(), 2),
             other => panic!("{other:?}"),
         }
-        assert_eq!(r.resolve("m", None), Resolve::Found(id(3)));
-        assert_eq!(r.resolve("m", Some(&id(3))), Resolve::NotFound);
+        assert_eq!(r.resolve("x", None), Resolve::Found(id(3)));
+        assert_eq!(r.resolve("x", Some(&id(3))), Resolve::NotFound);
         assert_eq!(r.resolve("0303", None), Resolve::Found(id(3)));
         assert_eq!(r.resolve("zzz", None), Resolve::NotFound);
     }
 
     #[test]
     fn validate_rejects_bad_input() {
-        let mut r = roster(&[entry(1, "fern", 10, 1)], &[]);
+        let mut r = roster(&[entry(1, "toluene", 10, 1)], &[]);
         assert!(r.validate().is_ok());
         r.entries.get_mut(&id(1)).unwrap().name = "Bad Name".into();
         assert!(r.validate().is_err());
-        let mut r = roster(&[entry(1, "fern", 10, 1)], &[]);
+        let mut r = roster(&[entry(1, "toluene", 10, 1)], &[]);
         r.entries.insert(id(2), entry(1, "x", 1, 1));
         assert!(r.validate().is_err());
         let mut r = Roster::default();
@@ -670,7 +670,7 @@ mod tests {
             let mut r = Roster::default();
             for _ in 0..self.next() % 5 {
                 let i = (self.next() % 6) as u8;
-                let names = ["fern", "moss", "tin", "x"];
+                let names = ["toluene", "xylene", "phenol", "x"];
                 let e = Entry {
                     id: id(i),
                     name: names[(self.next() % 4) as usize].into(),
@@ -823,7 +823,7 @@ mod tests {
 
     #[test]
     fn sanitize_drops_far_future_entries_but_never_tombstones() {
-        let mut r = roster(&[Entry { named_at: u64::MAX, ..entry(1, "fern", 10, 1) }, entry(2, "moss", 10, 1)], &[(3, u64::MAX, 2)]);
+        let mut r = roster(&[Entry { named_at: u64::MAX, ..entry(1, "toluene", 10, 1) }, entry(2, "xylene", 10, 1)], &[(3, u64::MAX, 2)]);
         r.fleet = Fleet { relays: vec!["https://r.example".into()], updated_at: u64::MAX, updated_by: Some(id(2)) };
         let dropped = r.sanitize_remote();
         assert_eq!(dropped.len(), 2);
@@ -836,16 +836,16 @@ mod tests {
     #[test]
     fn clock_skew_cannot_unrevoke() {
         // Revoked by a machine whose clock says 1970; re-added by one whose clock is far ahead.
-        let mut a = roster(&[entry(2, "moss", 10, 1)], &[(2, 0, 1)]);
-        let ahead = roster(&[Entry { named_at: MAX_TIME, added_at: MAX_TIME, ..entry(2, "moss", 10, 3) }], &[]);
+        let mut a = roster(&[entry(2, "xylene", 10, 1)], &[(2, 0, 1)]);
+        let ahead = roster(&[Entry { named_at: MAX_TIME, added_at: MAX_TIME, ..entry(2, "xylene", 10, 3) }], &[]);
         a.merge(&ahead);
         assert!(!a.is_member(&id(2)));
-        assert!(a.add(id(2), "moss", id(1), MAX_TIME).is_err());
+        assert!(a.add(id(2), "xylene", id(1), MAX_TIME).is_err());
         // A rename from a machine with a normal clock still wins over a far-future name.
-        let mut b = roster(&[Entry { named_at: MAX_TIME, ..entry(4, "tin", 10, 1) }], &[]);
+        let mut b = roster(&[Entry { named_at: MAX_TIME, ..entry(4, "phenol", 10, 1) }], &[]);
         assert!(b.rename(id(4), "tinny", 1_000).unwrap());
         assert_eq!(b.entries[&id(4)].name, "tinny");
-        let mut c = roster(&[Entry { named_at: u64::MAX, ..entry(4, "tin", 10, 1) }], &[]);
+        let mut c = roster(&[Entry { named_at: u64::MAX, ..entry(4, "phenol", 10, 1) }], &[]);
         assert!(c.rename(id(4), "tinny", 1_000).is_ok(), "no overflow at the top of the clock");
     }
 
@@ -926,10 +926,10 @@ mod tests {
 
     #[test]
     fn names() {
-        assert!(valid_name("fern"));
+        assert!(valid_name("toluene"));
         assert!(valid_name("a-1"));
         assert!(!valid_name("-a"));
-        assert!(!valid_name("Fern"));
+        assert!(!valid_name("Toluene"));
         assert!(!valid_name(""));
         assert!(!valid_name(&"a".repeat(33)));
         assert!(!valid_name("a b"));

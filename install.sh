@@ -3,7 +3,7 @@
 # unless asked.
 #
 #   curl -fsSL https://raw.githubusercontent.com/ZahakJ/jaunt/main/install.sh | sh
-#   sh install.sh --relay https://relay.example.net --name fern
+#   sh install.sh --relay https://relay.example.net --name toluene
 #   sh install.sh --from-file ./jaunt-x86_64-linux-musl     # no network
 #
 # Options:

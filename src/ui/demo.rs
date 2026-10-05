@@ -1,9 +1,9 @@
 //! `jaunt demo [mesh|link|ls]`: the real views driven by a simulated mesh, for trying the
 //! look and for captures. Deterministic: the same `--at` gives the same frame.
 //!
-//! The story: forge (this desktop) with fern (a laptop on the LAN that roams to a phone
-//! hotspot), moss (a server whose path upgrades from the relay to direct), tin (behind a
-//! hard NAT, stays relayed) and quill (asleep).
+//! The story: benzene (this desktop) with toluene (a laptop on the LAN that roams to a phone
+//! hotspot), xylene (a server whose path upgrades from the relay to direct), phenol (behind a
+//! hard NAT, stays relayed) and styrene (asleep).
 
 use std::time::{Duration, Instant};
 
@@ -42,10 +42,10 @@ fn r(seed: u8, name: &str) -> PeerRef {
     PeerRef { id: id(seed), name: name.into() }
 }
 
-const FERN: u8 = 0x1a;
-const MOSS: u8 = 0x5d;
-const TIN: u8 = 0x93;
-const QUILL: u8 = 0xc6;
+const TOLUENE: u8 = 0x1a;
+const XYLENE: u8 = 0x5d;
+const PHENOL: u8 = 0x93;
+const STYRENE: u8 = 0xc6;
 
 /// Round-trip time of `peer` at demo time `t` (ms), with a little deterministic jitter.
 fn rtt(peer: u8, t: i64) -> Option<(f64, PathKind)> {
@@ -53,11 +53,11 @@ fn rtt(peer: u8, t: i64) -> Option<(f64, PathKind)> {
     let j = (((s * 7919 + peer as i64 * 104_729) % 1000) as f64 / 1000.0 - 0.5).abs();
     let wave = ((s as f64) / 6.0 + peer as f64).sin();
     match peer {
-        FERN if t < 9 * SEC as i64 => Some((0.7 + 0.25 * j + 0.08 * wave, PathKind::Direct)),
-        FERN => Some((22.0 + 9.0 * j + 3.0 * wave, PathKind::Direct)),
-        MOSS if t < 3500 => Some((41.0 + 12.0 * j + 4.0 * wave, PathKind::Relay)),
-        MOSS => Some((8.6 + 2.5 * j + 0.8 * wave, PathKind::Direct)),
-        TIN => Some((47.0 + 22.0 * j + 9.0 * wave, PathKind::Relay)),
+        TOLUENE if t < 9 * SEC as i64 => Some((0.7 + 0.25 * j + 0.08 * wave, PathKind::Direct)),
+        TOLUENE => Some((22.0 + 9.0 * j + 3.0 * wave, PathKind::Direct)),
+        XYLENE if t < 3500 => Some((41.0 + 12.0 * j + 4.0 * wave, PathKind::Relay)),
+        XYLENE => Some((8.6 + 2.5 * j + 0.8 * wave, PathKind::Direct)),
+        PHENOL => Some((47.0 + 22.0 * j + 9.0 * wave, PathKind::Relay)),
         _ => None,
     }
 }
@@ -70,9 +70,9 @@ fn peer(seed: u8, name: &str, state: PeerState, t: i64) -> PeerStatus {
         })
         .collect();
     let (addr, kind, host, sessions, since, seen) = match seed {
-        FERN => ("192.168.1.23:41641", "lan", Some("awake"), Some(2), BASE - 2 * HOUR - 13 * MIN, None),
-        MOSS => ("https://relay.jaunt.example", "relay", None, Some(1), BASE - 40 * SEC, None),
-        TIN => ("https://relay.jaunt.example", "relay", Some("on battery"), Some(0), BASE - 25 * MIN, None),
+        TOLUENE => ("192.168.1.23:41641", "lan", Some("awake"), Some(2), BASE - 2 * HOUR - 13 * MIN, None),
+        XYLENE => ("https://relay.jaunt.example", "relay", None, Some(1), BASE - 40 * SEC, None),
+        PHENOL => ("https://relay.jaunt.example", "relay", Some("on battery"), Some(0), BASE - 25 * MIN, None),
         _ => ("", "", Some("will sleep on lid close"), None, 0, Some(BASE - 2 * HOUR - 50 * MIN)),
     };
     let up = matches!(state, PeerState::Direct | PeerState::Relay);
@@ -95,7 +95,7 @@ fn peer(seed: u8, name: &str, state: PeerState, t: i64) -> PeerStatus {
 
 fn snapshot() -> StatusSnapshot {
     StatusSnapshot {
-        me: r(0x07, "forge"),
+        me: r(0x07, "benzene"),
         version: "0.1.0".into(),
         daemon_pid: 4242,
         started_at_ms: BASE - 3 * HOUR,
@@ -103,10 +103,10 @@ fn snapshot() -> StatusSnapshot {
         relay_connected: true,
         bound: vec![],
         peers: vec![
-            peer(FERN, "fern", PeerState::Direct, 0),
-            peer(MOSS, "moss", PeerState::Relay, 0),
-            peer(TIN, "tin", PeerState::Relay, 0),
-            peer(QUILL, "quill", PeerState::Offline, 0),
+            peer(TOLUENE, "toluene", PeerState::Direct, 0),
+            peer(XYLENE, "xylene", PeerState::Relay, 0),
+            peer(PHENOL, "phenol", PeerState::Relay, 0),
+            peer(STYRENE, "styrene", PeerState::Offline, 0),
         ],
         revoked: vec![],
         host: None,
@@ -119,31 +119,31 @@ fn script() -> Vec<(i64, Option<PeerRef>, EventKind)> {
     let h = |m: u64| -(m as i64);
     vec![
         (h(3 * HOUR), None, DaemonStarted { version: "0.1.0".into() }),
-        (h(2 * HOUR + 50 * MIN), Some(r(QUILL, "quill")), Disconnected { reason: "idle timeout".into() }),
-        (h(2 * HOUR + 13 * MIN), Some(r(FERN, "fern")), Handshake { incoming: true, path: PathKind::Direct }),
-        (h(2 * HOUR + 12 * MIN), Some(r(FERN, "fern")), Sync { changed: false, outgoing: false }),
-        (h(97 * MIN), Some(r(FERN, "fern")), Served { service: "shell jaunt".into() }),
-        (h(61 * MIN), None, RosterChanged { what: "relay list updated by fern".into() }),
-        (h(25 * MIN), Some(r(TIN, "tin")), Handshake { incoming: false, path: PathKind::Relay }),
-        (h(24 * MIN), Some(r(TIN, "tin")), Sync { changed: true, outgoing: true }),
-        (h(11 * MIN), Some(r(TIN, "tin")), Served { service: "cp".into() }),
-        (h(40 * SEC), Some(r(MOSS, "moss")), Handshake { incoming: false, path: PathKind::Relay }),
-        (h(39 * SEC), Some(r(MOSS, "moss")), Sync { changed: false, outgoing: true }),
-        (1200, Some(r(FERN, "fern")), Served { service: "shell jaunt".into() }),
+        (h(2 * HOUR + 50 * MIN), Some(r(STYRENE, "styrene")), Disconnected { reason: "idle timeout".into() }),
+        (h(2 * HOUR + 13 * MIN), Some(r(TOLUENE, "toluene")), Handshake { incoming: true, path: PathKind::Direct }),
+        (h(2 * HOUR + 12 * MIN), Some(r(TOLUENE, "toluene")), Sync { changed: false, outgoing: false }),
+        (h(97 * MIN), Some(r(TOLUENE, "toluene")), Served { service: "shell jaunt".into() }),
+        (h(61 * MIN), None, RosterChanged { what: "relay list updated by toluene".into() }),
+        (h(25 * MIN), Some(r(PHENOL, "phenol")), Handshake { incoming: false, path: PathKind::Relay }),
+        (h(24 * MIN), Some(r(PHENOL, "phenol")), Sync { changed: true, outgoing: true }),
+        (h(11 * MIN), Some(r(PHENOL, "phenol")), Served { service: "cp".into() }),
+        (h(40 * SEC), Some(r(XYLENE, "xylene")), Handshake { incoming: false, path: PathKind::Relay }),
+        (h(39 * SEC), Some(r(XYLENE, "xylene")), Sync { changed: false, outgoing: true }),
+        (1200, Some(r(TOLUENE, "toluene")), Served { service: "shell jaunt".into() }),
         (
             3500,
-            Some(r(MOSS, "moss")),
+            Some(r(XYLENE, "xylene")),
             PathChanged { from: PathKind::Relay, to: PathKind::Direct, remote_addr: Some("203.0.113.40:7841".into()) },
         ),
-        (6000, Some(r(TIN, "tin")), Sync { changed: false, outgoing: true }),
+        (6000, Some(r(PHENOL, "phenol")), Sync { changed: false, outgoing: true }),
         (
             9000,
-            Some(r(FERN, "fern")),
+            Some(r(TOLUENE, "toluene")),
             PathChanged { from: PathKind::Direct, to: PathKind::Direct, remote_addr: Some("172.20.10.4:41641".into()) },
         ),
-        (13_000, Some(r(QUILL, "quill")), DialFailed { error: "no answer (asleep?)".into() }),
-        (16_000, Some(r(TIN, "tin")), Served { service: "exec".into() }),
-        (21_000, Some(r(MOSS, "moss")), Sync { changed: true, outgoing: false }),
+        (13_000, Some(r(STYRENE, "styrene")), DialFailed { error: "no answer (asleep?)".into() }),
+        (16_000, Some(r(PHENOL, "phenol")), Served { service: "exec".into() }),
+        (21_000, Some(r(XYLENE, "xylene")), Sync { changed: true, outgoing: false }),
     ]
 }
 
@@ -183,7 +183,7 @@ impl Sim {
         while self.sec < t.div_euclid(1000) {
             self.sec += 1;
             let at = self.sec * 1000;
-            for p in [FERN, MOSS, TIN] {
+            for p in [TOLUENE, XYLENE, PHENOL] {
                 if let Some((v, path)) = rtt(p, at) {
                     let sample = RttSample { t_ms: Self::now(at), rtt_ms: v, path };
                     self.mesh.apply_rtt(&id(p), &sample, Self::now(at));
@@ -193,7 +193,7 @@ impl Sim {
         // Past the end of the story: a quiet sync now and then, so it keeps living.
         if t > 24_000 && (t / 1000) % 15 == 0 && self.next == self.events.len() {
             let k = (t / 15_000) as usize;
-            let (seed, name) = [(MOSS, "moss"), (TIN, "tin"), (FERN, "fern")][k % 3];
+            let (seed, name) = [(XYLENE, "xylene"), (PHENOL, "phenol"), (TOLUENE, "toluene")][k % 3];
             let at = (t / 1000) * 1000;
             if !self.mesh.log.front().is_some_and(|l| l.t_ms == Self::now(at)) {
                 let ev = Event { seq: 0, t_ms: Self::now(at), peer: Some(r(seed, name)), kind: EventKind::Sync { changed: false, outgoing: k.is_multiple_of(2) } };
@@ -205,13 +205,13 @@ impl Sim {
     fn after_event(&mut self, at: i64) {
         // Facts that come from status polls in real use.
         if at == 3500
-            && let Some(p) = self.mesh.peers.iter_mut().find(|p| p.name == "moss")
+            && let Some(p) = self.mesh.peers.iter_mut().find(|p| p.name == "xylene")
         {
             p.addr_kind = Some("public".into());
             p.addr = Some("203.0.113.40:7841".into());
         }
         if at == 9000
-            && let Some(p) = self.mesh.peers.iter_mut().find(|p| p.name == "fern")
+            && let Some(p) = self.mesh.peers.iter_mut().find(|p| p.name == "toluene")
         {
             p.addr_kind = Some("public".into());
         }
@@ -248,13 +248,13 @@ pub async fn run(what: &str, at: Option<f64>, join: bool) -> Result<i32> {
         "link" => link(parse_at(at), join).await,
         "hop" => {
             let lines = [
-                "$ jaunt fern".to_string(),
-                super::hop_banner_in("forge", "fern", PathKind::Direct, Some(0.8)),
-                super::link_lost_line("fern", 4),
-                super::hop_banner_out("forge", "fern", true),
-                "$ jaunt tin".to_string(),
-                super::hop_banner_in("forge", "tin", PathKind::Relay, Some(48.0)),
-                super::hop_banner_out("forge", "tin", false),
+                "$ jaunt toluene".to_string(),
+                super::hop_banner_in("benzene", "toluene", PathKind::Direct, Some(0.8)),
+                super::link_lost_line("toluene", 4),
+                super::hop_banner_out("benzene", "toluene", true),
+                "$ jaunt phenol".to_string(),
+                super::hop_banner_in("benzene", "phenol", PathKind::Relay, Some(48.0)),
+                super::hop_banner_out("benzene", "phenol", false),
             ];
             print_lines(lines)
         }
@@ -268,7 +268,7 @@ async fn mesh(at: Option<i64>) -> Result<i32> {
     }
     let mut sim = Sim::new();
     let mut tui = Tui::new();
-    // moss is selected: its path history shows the relay-to-direct upgrade.
+    // xylene is selected: its path history shows the relay-to-direct upgrade.
     let mut st = ViewState { tag: "demo", selected: 1, ..ViewState::default() };
     let start = Instant::now();
     let clock = |start: &Instant| at.unwrap_or(start.elapsed().as_millis() as i64);
@@ -309,12 +309,12 @@ async fn mesh(at: Option<i64>) -> Result<i32> {
 
 /// The ritual's updates with their demo times (ms).
 fn link_script(role: PairRole) -> Vec<(i64, PairStep)> {
-    let fern = r(FERN, "fern");
-    let forge = r(0x07, "forge");
+    let toluene = r(TOLUENE, "toluene");
+    let benzene = r(0x07, "benzene");
     let sigil = vec!["#.#.#".into(), "##.##".into(), ".###.".into(), "#.#.#".into(), "##.##".into()];
     let words: Vec<String> = vec!["tremor".into(), "orbit".into(), "velvet".into()];
     let inviter = role == PairRole::Inviter;
-    let other = if inviter { fern.clone() } else { forge.clone() };
+    let other = if inviter { toluene.clone() } else { benzene.clone() };
     let mut v = vec![];
     if inviter {
         v.push((
@@ -340,9 +340,9 @@ fn link_script(role: PairRole) -> Vec<(i64, PairStep)> {
     ]);
     if inviter {
         v.extend([
-            (12_000, PairStep::FanOut { machine: r(MOSS, "moss"), ok: true, detail: String::new() }),
-            (12_400, PairStep::FanOut { machine: r(TIN, "tin"), ok: true, detail: String::new() }),
-            (13_200, PairStep::FanOut { machine: r(QUILL, "quill"), ok: false, detail: "asleep".into() }),
+            (12_000, PairStep::FanOut { machine: r(XYLENE, "xylene"), ok: true, detail: String::new() }),
+            (12_400, PairStep::FanOut { machine: r(PHENOL, "phenol"), ok: true, detail: String::new() }),
+            (13_200, PairStep::FanOut { machine: r(STYRENE, "styrene"), ok: false, detail: "asleep".into() }),
             (13_300, PairStep::FanOutDone { told: 2, not_yet: 1 }),
         ]);
     }
@@ -351,7 +351,7 @@ fn link_script(role: PairRole) -> Vec<(i64, PairStep)> {
 
 async fn link(at: Option<i64>, join: bool) -> Result<i32> {
     let role = if join { PairRole::Joiner } else { PairRole::Inviter };
-    let me = if join { "fern" } else { "forge" };
+    let me = if join { "toluene" } else { "benzene" };
     let code = join.then(|| "4127-tremor-kudos".to_string());
     let script = link_script(role);
     let build = |t: i64| {
