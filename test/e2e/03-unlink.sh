@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Revocation (DESIGN §7) in the Docker NAT harness. a, b, c are linked with the ritual
-# (c through b). a unlinks c: c's shell and command on b are ended at once, a and b refuse
+# (c through b). a unlinks c: c's shell and commands on b (one ignores SIGHUP) are ended at once, a and b refuse
 # c, c cannot come back by syncing or by pairing with its old key. Then c is linked again
 # with a new key and opens a tmux session on a; b is frozen, a unlinks c meanwhile with
 # --kill-sessions (c's session on a ends; the reminder about what revocation does not undo
@@ -56,20 +56,23 @@ check "a, b, c all connected" wait_until 120 all_connected
 note "phase 1: c holds a shell and a command on b; a unlinks c"
 docker exec -d -u jaunt jaunt-c "${H_ENV[@]}" TERM=xterm python3 -c 'import pty; pty.spawn(["jaunt", "b:victim"])'
 docker exec -d -u jaunt jaunt-c "${H_ENV[@]}" jaunt run b -- sleep 600
+# A command that ignores SIGHUP: only the follow-up SIGKILL ends it (found in verification:
+# the stream used to be dropped at revocation, which unregistered it before that SIGKILL).
+docker exec -d -u jaunt jaunt-c "${H_ENV[@]}" jaunt run b -- sh -c 'trap "" HUP; exec sleep 601'
 check "c's shell is attached to tmux session 'victim' on b" wait_until 20 c_hop_attached
-check "c's 'sleep 600' runs on b" wait_until 20 on_b_sleeping
+check "c's 'sleep 600' and HUP-ignoring 'sleep 601' run on b" wait_until 20 sh -c '[ "$(docker exec jaunt-b pgrep -u jaunt -x sleep | wc -l)" -ge 2 ]'
 h_jaunt a unlink c > "$OUT-unlink1.out" 2>&1
 check "a: jaunt unlink c succeeds" [ $? = 0 ]
 sed 's/^/    a| /' "$OUT-unlink1.out"
 check "a: b confirmed" grep -q "confirmed by: b" "$OUT-unlink1.out"
-check "b: c's command was ended" wait_until 5 sh -c '! docker exec jaunt-b pgrep -u jaunt -x sleep'
+check "b: c's commands were ended (the HUP-ignoring one too)" wait_until 5 sh -c '! docker exec jaunt-b pgrep -u jaunt -x sleep'
 check "b: c's shell was detached" wait_until 5 c_hop_detached
 check "b: the tmux session itself is kept (it is the owner's)" h_exec b tmux -L jaunt-test has-session -t victim
 h_exec b timeout 2 jaunt debug events --history 300 > "$OUT-events-b.jsonl" 2>/dev/null
-check "b: a 'revoked' event for c with 2 processes ended" \
+check "b: a 'revoked' event for c with 3 processes ended" \
   python3 -c "import json,sys
 ev=[e for e in map(json.loads, open(sys.argv[1])) if e.get('event')=='revoked']
-assert any(e['peer']['name']=='c' and e['sessions_killed']==2 for e in ev), ev" "$OUT-events-b.jsonl"
+assert any(e['peer']['name']=='c' and e['sessions_killed']==3 for e in ev), ev" "$OUT-events-b.jsonl"
 check "a lists c as revoked" revoked_on a
 check "b lists c as revoked" revoked_on b
 check "c is refused by a" c_refused_by a

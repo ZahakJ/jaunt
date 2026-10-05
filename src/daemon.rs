@@ -43,6 +43,9 @@ const ABSENT_AFTER_MS: u64 = 60_000;
 const TICK_GAP_MS: u64 = 5_000;
 /// How long a gated request waits for the settling round (it is bounded by SETTLE_LIMIT).
 const SETTLE_WAIT: Duration = Duration::from_secs(8);
+/// How long a revoked peer's stream may still run so that the process it started gets the
+/// follow-up SIGKILL (`children::kill_peer` sends it after 1 s).
+const REVOKED_GRACE: Duration = Duration::from_secs(3);
 
 #[derive(Default)]
 struct Peer {
@@ -158,7 +161,7 @@ pub fn describe_close(e: &ConnectionError) -> String {
     match e {
         ConnectionError::TimedOut => "no answer for 30 s (timed out)".into(),
         ConnectionError::ApplicationClosed(c) => {
-            let why = String::from_utf8_lossy(&c.reason).to_string();
+            let why = crate::term::safe_text(&String::from_utf8_lossy(&c.reason), 200, false);
             if why.is_empty() { "closed by the other side".into() } else { format!("closed by the other side: {why}") }
         }
         ConnectionError::LocallyClosed => "closed here".into(),
@@ -752,10 +755,16 @@ impl Daemon {
             }
         }
         let served = self.clone().serve_service(conn, id, hello.service, send, recv);
+        tokio::pin!(served);
         // R3: whatever a peer runs here ends when it is revoked, streams included.
         tokio::select! {
-            r = served => r,
+            r = &mut served => r,
             _ = self.until_revoked(id) => {
+                // Not dropped at once: the serving future holds the process's registration
+                // (`children::Ticket`), and `kill_peer` sends its SIGKILL a second after the
+                // SIGHUP only to processes still registered. Dropping it here would let a
+                // command that ignores SIGHUP outlive the revocation.
+                let _ = timeout(REVOKED_GRACE, &mut served).await;
                 tracing::info!("ended a stream of {}: it was unlinked", id.short());
                 Ok(())
             }
@@ -873,7 +882,7 @@ impl Daemon {
         proto::write_json(&mut send, FrameType::Json, ours).await?;
         let reply: Reply = proto::parse_json(&proto::expect_frame(&mut recv, FrameType::Reply).await?, MAX_HEADER)?;
         if let Reply::Refused { reason } = reply {
-            bail!("sync refused: {reason}");
+            bail!("sync refused: {}", crate::term::safe_text(&reason, 300, false));
         }
         let theirs: Roster = proto::parse_json(&proto::expect_frame(&mut recv, FrameType::Json).await?, MAX_FRAME)?;
         let _ = send.finish();
@@ -1486,7 +1495,8 @@ pub async fn open_service(conn: &Connection, service: Service) -> Result<(SendSt
     let reply: Reply = proto::parse_json(&proto::expect_frame(&mut recv, FrameType::Reply).await?, MAX_HEADER)?;
     match reply {
         Reply::Ok => Ok((send, recv)),
-        Reply::Refused { reason } => bail!("refused: {reason}"),
+        // Peer text; it can end up on this machine's terminal (unlink's report, R5).
+        Reply::Refused { reason } => bail!("refused: {}", crate::term::safe_text(&reason, 300, false)),
     }
 }
 

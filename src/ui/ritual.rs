@@ -259,9 +259,11 @@ pub fn draw(st: &State, w: u16, now: u64) -> Canvas {
                     y += 2;
                 }
             }
-            c.text(3, y, "on the new machine run", Style::fg(theme::DIM));
+            // The code is typed when `jaunt join` asks for it, never put on the command line,
+            // where every local user of the new machine could read it while it runs (PAIR-2).
+            c.text(3, y, "on the new machine run, then type the code", Style::fg(theme::DIM));
             y += 1;
-            let head = format!("jaunt join {code}");
+            let head = "jaunt join".to_string();
             let tail = st.relay.as_ref().map(|r| format!("--relay {r}"));
             let room = w.saturating_sub(6);
             let cmd_st = Style::fg(theme::WHITE).bold();
@@ -511,7 +513,7 @@ pub fn plain_lines(u: &PairUpdate) -> Vec<String> {
             }
             v.push(format!("code: {code}   (works once, for 5 minutes)"));
             let relay = relays.first().map(|r| format!(" --relay {r}")).unwrap_or_default();
-            v.push(format!("on the new machine run:  jaunt join {code}{relay}"));
+            v.push(format!("on the new machine run:  jaunt join{relay}   (then type the code when it asks)"));
             v.push("waiting for the other machine...".into());
             v
         }
@@ -711,5 +713,23 @@ mod tests {
         assert!(!line.chars().any(|c| c.is_control()), "{line:?}");
         assert!(line.starts_with("jaunt: the other machine stopped"));
         assert_eq!(plain_finish(true, "linked fern"), "linked fern");
+    }
+
+    /// PAIR-2: the inviter's screen must not tell the owner to put the code in argv on the
+    /// new machine (the process list shows it to every local user there).
+    #[test]
+    fn the_join_hint_keeps_the_code_off_the_command_line() {
+        let code = "4127-tremor-kudos".to_string();
+        let u = PairUpdate {
+            role: PairRole::Inviter,
+            step: PairStep::Waiting { code: code.clone(), expires_at_ms: 0, relays: vec!["https://r.example".into()], first_machine: false },
+        };
+        let lines = plain_lines(&u);
+        let hint = lines.iter().find(|l| l.contains("jaunt join")).expect("a join hint");
+        assert!(!hint.contains(&code), "{hint}");
+        let mut st = State::new(PairRole::Inviter, "a", None, 0);
+        st.apply(&u, 0, true);
+        let text: String = draw(&st, 100, 0).lines(theme::ColorMode::Plain).join("\n");
+        assert!(!text.lines().any(|l| l.contains("jaunt join") && l.contains("4127")), "{text}");
     }
 }

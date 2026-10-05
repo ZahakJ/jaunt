@@ -284,10 +284,16 @@ fn tmux_hint_once(paths: &Paths, peer: &str) {
     if marker.exists() {
         return;
     }
-    let snippet = std::process::Command::new("tmux")
-        .args(["show-options", "-gqv", "@jaunt_tmux"])
-        .stderr(std::process::Stdio::null())
-        .output()
+    // By absolute path (L2): an empty or relative PATH entry must not pick up a `tmux`
+    // planted in whatever directory this command runs in.
+    let snippet = which("tmux")
+        .and_then(|tmux| {
+            std::process::Command::new(tmux)
+                .args(["show-options", "-gqv", "@jaunt_tmux"])
+                .stderr(std::process::Stdio::null())
+                .output()
+                .ok()
+        })
         .map(|o| o.stdout.starts_with(b"1"))
         .unwrap_or(false);
     if !snippet {

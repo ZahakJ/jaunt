@@ -246,21 +246,28 @@ impl Roster {
     pub fn merge_bounded(&mut self, other: &Roster) -> (bool, usize) {
         let before = self.clone();
         let mut skipped = 0;
+        // Invariant that keeps every later tombstone for a known id possible: each tombstone
+        // either has an entry here, or is one of at most MAX_FOREIGN_TOMBSTONES without, so
+        // tombstones <= MAX_ENTRIES + MAX_FOREIGN_TOMBSTONES = MAX_TOMBSTONES always. An
+        // entry that only `other` carries does not make its tombstone "known" until the entry
+        // is actually taken (the entries may be full); such tombstones wait for the entries.
+        let mut later = Vec::new();
+        let take_tombstone = |me: &mut Roster, id: &MachineId, theirs: &Tombstone, skipped: &mut usize| {
+            let foreign = me.tombstones.keys().filter(|t| !me.entries.contains_key(t)).count();
+            if me.entries.contains_key(id) || foreign < MAX_FOREIGN_TOMBSTONES {
+                me.tombstones.insert(*id, theirs.clone());
+            } else {
+                *skipped += 1;
+            }
+        };
         for (id, theirs) in &other.tombstones {
             match self.tombstones.get(id) {
                 Some(ours) if (ours.revoked_at, ours.revoked_by) <= (theirs.revoked_at, theirs.revoked_by) => {}
                 Some(_) => {
                     self.tombstones.insert(*id, theirs.clone());
                 }
-                None => {
-                    let known = self.entries.contains_key(id) || other.entries.contains_key(id);
-                    let foreign = self.tombstones.keys().filter(|t| !self.entries.contains_key(t)).count();
-                    if known || foreign < MAX_FOREIGN_TOMBSTONES {
-                        self.tombstones.insert(*id, theirs.clone());
-                    } else {
-                        skipped += 1;
-                    }
-                }
+                None if !self.entries.contains_key(id) && other.entries.contains_key(id) => later.push((id, theirs)),
+                None => take_tombstone(self, id, theirs, &mut skipped),
             }
         }
         for (id, theirs) in &other.entries {
@@ -270,7 +277,7 @@ impl Roster {
                     self.entries.insert(*id, theirs.clone());
                 }
                 None => {
-                    let revoked = self.tombstones.contains_key(id);
+                    let revoked = self.tombstones.contains_key(id) || other.tombstones.contains_key(id);
                     let room = self.entries.len() < MAX_ENTRIES && (revoked || self.members().count() < MAX_MEMBERS);
                     if room {
                         self.entries.insert(*id, theirs.clone());
@@ -279,6 +286,9 @@ impl Roster {
                     }
                 }
             }
+        }
+        for (id, theirs) in later {
+            take_tombstone(self, id, theirs, &mut skipped);
         }
         let rank = |f: &Fleet| (f.updated_at, f.updated_by, f.relays.clone());
         if rank(&other.fleet) > rank(&self.fleet) {
@@ -712,6 +722,50 @@ mod tests {
         let mut naive = roster(&[entry(1, "a", 1, 1), entry(2, "b", 2, 1), entry(3, "c", 3, 1)], &[]);
         naive.merge(&from_a);
         assert!(naive.validate().is_err());
+    }
+
+    /// R1, variation (found in verification): junk whose tombstones name ids that the same
+    /// junk roster also carries as entries. Those tombstones used to count as "known" even
+    /// when the entries themselves were not taken (entries full), so a pusher could fill the
+    /// tombstones exactly to the limit; from then on every later tombstone, a remote one or
+    /// a local `unlink`, failed `validate` and was refused whole. Runs the daemon's path:
+    /// sanitize, drop_malformed, merge_bounded, validate.
+    #[test]
+    fn junk_with_matching_entries_cannot_fill_the_tombstones() {
+        let kid = |n: u32| {
+            let mut s = [0u8; 32];
+            s[..4].copy_from_slice(&n.to_be_bytes());
+            s[31] = 0x5a;
+            MachineId::from_endpoint(&iroh::SecretKey::from_bytes(&s).public())
+        };
+        let take = |r: &mut Roster, theirs: &Roster| -> Result<()> {
+            let mut theirs = theirs.clone();
+            theirs.sanitize_remote();
+            theirs.drop_malformed();
+            let mut m = r.clone();
+            m.merge_bounded(&theirs);
+            m.validate()?;
+            *r = m;
+            Ok(())
+        };
+        let mut b = roster(&[entry(1, "a", 1, 1), entry(2, "b", 2, 1), entry(3, "c", 3, 1)], &[]);
+        let mut junk = Roster::default();
+        for n in 0..MAX_TOMBSTONES as u32 {
+            let j = kid(n);
+            junk.entries.insert(j, Entry { id: j, name: "x".into(), added_at: 9, added_by: id(3), named_at: 9 });
+            junk.tombstones.insert(j, Tombstone { id: j, revoked_at: 9, revoked_by: id(3) });
+        }
+        let _ = take(&mut b, &junk);
+        assert!(b.tombstones.len() <= MAX_ENTRIES.min(b.entries.len()) + MAX_FOREIGN_TOMBSTONES);
+        // a tells b that c is revoked: it must get through.
+        let mut from_a = Roster::default();
+        from_a.tombstones.insert(id(3), Tombstone { id: id(3), revoked_at: 50, revoked_by: id(1) });
+        take(&mut b, &from_a).expect("a revocation was refused after the junk");
+        assert!(!b.is_member(&id(3)));
+        // And so must a local unlink of a member here.
+        let mut local = b.clone();
+        local.revoke(id(2), id(1), 60);
+        local.validate().expect("a local unlink was refused after the junk");
     }
 
     #[test]
