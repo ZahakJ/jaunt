@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Manual
+    url: https://zahakj.github.io/jaunt/manual/
+    about: Install, pairing, hopping, host mode, the relay, the security model, troubleshooting.
+  - name: Security
+    url: https://github.com/ZahakJ/jaunt/security/advisories/new
+    about: Report a vulnerability privately.

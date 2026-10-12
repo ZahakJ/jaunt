@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>jaunt</title>
+<meta name="description" content="jaunt: hop between your own machines. One static binary, no root, no accounts. A direct encrypted link when one can be made, a relay you host when it cannot, and a tmux session that waits for you.">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f7f7fa" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1b1b26" media="(prefers-color-scheme: dark)">
+<meta property="og:type" content="website">
+<meta property="og:title" content="jaunt">
+<meta property="og:description" content="Sit at any of your machines and open a terminal on any other. One static binary, no root, no accounts, no third-party service.">
+<meta property="og:url" content="https://zahakj.github.io/jaunt/">
+<meta property="og:image" content="https://zahakj.github.io/jaunt/media/banner.png">
+<meta property="og:image:alt" content="jaunt: sit at any of your machines and open a terminal on any other. Beside the words, the live mesh view: one machine linked to four others, direct paths in solid green and a relayed path in dotted amber.">
+<meta property="og:image:width" content="1640">
+<meta property="og:image:height" content="640">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231b1b26'/%3E%3Cpath d='M9 16h11' stroke='%23b4a0ff' stroke-width='3' stroke-linecap='round'/%3E%3Cpath d='M19 11l5 5-5 5' fill='none' stroke='%236fe3e1' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='8' cy='16' r='3.5' fill='%23b4a0ff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to the content</a>
+
+<header class="site-header">
+  <div class="wrap bar">
+    <a class="wordmark" href="./" aria-label="jaunt, home"><span class="wm-text">jaunt</span> <span class="wm-arrow" aria-hidden="true">━━▸</span></a>
+    <nav aria-label="Main">
+      <ul>
+        <li><a href="./manual/">Manual</a></li>
+        <li><a href="https://github.com/ZahakJ/jaunt">GitHub</a></li>
+        <li><a href="#install">Install</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+
+<section class="hero wrap" aria-labelledby="hero-title">
+  <h1 id="hero-title">Sit at any of your machines and open a terminal on any other.</h1>
+  <p class="lede"><code>jaunt toluene</code> puts you in a tmux session on the machine called toluene, over a direct encrypted link when one can be made and through a relay you host when it cannot. One static binary, no root, no accounts, no third-party service.</p>
+  <p class="actions">
+    <a class="btn btn-primary" href="#install">Install</a>
+    <a class="btn" href="./manual/">Read the manual</a>
+  </p>
+
+  <figure class="term" aria-labelledby="hop-caption">
+    <div class="term-bar" aria-hidden="true"><span class="dots"><i></i><i></i><i></i></span><span class="term-title">benzene · jaunt</span></div>
+<pre class="term-body" role="img" aria-label="A terminal transcript. jaunt toluene: benzene to toluene, direct, 0.8 ms. Then: toluene, link lost, retrying in 4s, tilde-dot to give up. Then: back on benzene, session kept on toluene. Then jaunt phenol: benzene to phenol, relay, 48 ms. Then: back on benzene."><span class="ln"><span class="prompt">$</span> jaunt toluene</span>
+<span class="ln"><span class="t-dim">benzene</span> <span class="t-direct">━━<b>▸</b></span> <b class="t-target">toluene</b><span class="t-sep"> · </span><span class="t-direct">direct</span><span class="t-sep"> · </span><span class="t-bright">0.8 ms</span></span>
+<span class="ln"><b class="t-bright">toluene</b> <span class="t-relay">╌</span> <b class="t-relay">link lost</b><span class="t-sep"> · </span><span class="t-dim">retrying in 4s</span><span class="t-sep"> · </span><span class="t-dim">~. to give up</span></span>
+<span class="ln"><span class="t-accent">◂━━</span> back on <b class="t-accent">benzene</b><span class="t-sep"> · </span><span class="t-dim">session kept on toluene</span></span>
+<span class="ln"><span class="prompt">$</span> jaunt phenol</span>
+<span class="ln"><span class="t-dim">benzene</span> <span class="t-relay">╌╌<b>▸</b></span> <b class="t-target">phenol</b><span class="t-sep"> · </span><span class="t-relay">relay</span><span class="t-sep"> · </span><span class="t-bright">48 ms</span></span>
+<span class="ln"><span class="t-accent">◂━━</span> back on <b class="t-accent">benzene</b></span></pre>
+    <figcaption id="hop-caption"><code>jaunt demo hop</code>, v0.1.2: the demo prints the real client's output on made-up machines. The pictures below are <code>jaunt demo</code> too; try it before setting anything up.</figcaption>
+  </figure>
+</section>
+
+<section class="features wrap" aria-label="What it looks like">
+  <article class="feature">
+    <figure>
+      <img src="captures/mesh-100x28-truecolor.png" width="936" height="626" loading="lazy" alt="The jaunt mesh view on benzene: solid green lines to toluene and xylene, which are direct, a dotted amber line through the relay to phenol, styrene greyed out as offline, latency and a sparkline on each link, and an event log of roams, syncs and path upgrades underneath.">
+    </figure>
+    <div class="text">
+      <h2>The live mesh</h2>
+      <p>Type <code>jaunt</code> with no arguments and you see every machine you have linked, drawn from the one you sit at. A solid green line is a direct path between the two machines. A dotted amber line goes through the relay. A greyed-out machine is offline.</p>
+      <p>Each link carries its latency and a sparkline of the last minute, and the log underneath says what happened: a laptop roamed to a new network, a relayed path upgraded to a direct one. Arrows to choose a machine, Enter to hop, <kbd>q</kbd> to quit.</p>
+    </div>
+  </article>
+
+  <article class="feature flip">
+    <figure>
+      <img src="captures/link-sigil-80x24-truecolor.png" width="756" height="286" loading="lazy" alt="The pairing screen on benzene: a small square picture, the sigil, next to the three words tremor, orbit, velvet, with the question: same sigil and words on both screens? y yes, n no.">
+    </figure>
+    <div class="text">
+      <h2>Linking two machines</h2>
+      <p><code>jaunt link</code> on one machine shows a short code like <code>4127-tremor-kudos</code>. Type it on the other with <code>jaunt join</code>. Both screens then show the same small picture and the same three words. If they match, press <kbd>y</kbd> on both; if not, press <kbd>n</kbd>.</p>
+      <p>Underneath is SPAKE2, a password-authenticated key exchange with the code as the password. Someone in the middle gets exactly one guess per code, 1 in 60 million; a wrong guess burns the code, and codes expire after 5 minutes. The picture is the second, human check.</p>
+    </div>
+  </article>
+
+  <article class="feature">
+    <figure>
+      <img src="captures/ls-100x28-truecolor.png" width="936" height="306" loading="lazy" alt="The output of jaunt ls: toluene and xylene direct at 21 and 10 ms, phenol relayed at 44 ms and on battery, styrene offline and seen 2 hours ago with lid sleeps, toluene marked awake; summary line 2 direct, 1 relayed, 1 offline.">
+    </figure>
+    <div class="text">
+      <h2>The roster, and laptops that stay reachable</h2>
+      <p><code>jaunt ls</code> prints every machine: direct, relayed or offline, its latency, its sessions, and what its lid would do.</p>
+      <p>A laptop that sleeps cannot be hopped into. <code>jaunt host on</code> keeps it awake with the lid closed <strong>only while it is plugged in and not too hot</strong>; on battery, when hot, or when jaunt cannot tell, it sleeps as usual, so it will not cook in a bag. No real laptop has run this yet.</p>
+      <p>If a laptop is lost, <code>jaunt unlink toluene --kill-sessions</code> from any other machine cuts it off at once on every machine that is online, and lists any machine that has not heard yet.</p>
+    </div>
+  </article>
+</section>
+
+<section class="how wrap" aria-labelledby="how-title">
+  <h2 id="how-title">How it works</h2>
+<pre class="diagram" aria-label="Diagram: your terminal runs jaunt toluene, which talks to the local daemon; the daemon connects to the daemon on the other machine over QUIC with TLS 1.3, directly when possible and otherwise through the relay; the far daemon attaches to a tmux session."><code> your terminal                                               the other machine
+ jaunt toluene ── daemon ════ QUIC + TLS 1.3 ════ daemon ── tmux session
+                     │   direct when possible        │
+                     └──── else through the relay ───┘</code></pre>
+  <div class="cols">
+    <p>Each machine runs a small background service holding its own key.</p>
+    <p>Machines only accept keys on the shared member list, checked during the encrypted handshake.</p>
+    <p>The networking and encryption come from the <a href="https://iroh.computer">iroh</a> library, not from jaunt; jaunt adds the linking ritual, the member list and revocation, the hop commands, the mesh view and the lid guard.</p>
+    <p>Sessions live in tmux on the far machine, which is why they survive disconnects.</p>
+  </div>
+</section>
+
+<section class="trust wrap" aria-labelledby="trust-title">
+  <h2 id="trust-title">Before you trust it</h2>
+  <p class="warn"><strong>Keep your existing SSH path for now.</strong> jaunt is new, has had no outside security review, and has only been tested in a simulated network lab. Leave the way you reach your machines today (for example SSH through a Cloudflare tunnel) in place until jaunt has proven itself on your real machines.</p>
+  <ul class="facts">
+    <li><strong>Tested only in simulation.</strong> A Docker lab with three machines behind simulated home routers passes 250 end-to-end checks. No real laptop, lid, relay server, home network or Mac has run it. <a href="./manual/testing.html">What was tested</a></li>
+    <li><strong>No outside audit.</strong> Not of jaunt, not of the iroh library under it, and not of the SPAKE2 crate the pairing uses. A stolen, unlocked laptop is a full member until you revoke it. <a href="./manual/security.html">Security model</a></li>
+    <li><strong>Unsigned releases.</strong> The installer checks the binary against a checksum that comes from the same place as the binary. That catches a broken download, not a malicious release.</li>
+    <li><strong>Speed.</strong> In the lab a keystroke took 81 ms on jaunt's direct path against 121 to 139 ms for SSH through a relay host, with 20 ms of simulated delay per router. The gain is the direct path; through the relay jaunt is no faster than SSH. <a href="./manual/measurements.html">Numbers and method</a></li>
+    <li><strong>Choices made for you, and the ones that are yours</strong>: where the relay runs, and when to retire the path you use today. <a href="./manual/decisions.html">Decisions</a></li>
+  </ul>
+  <p class="aside"><strong>When Tailscale is the better choice.</strong> Tailscale's free plan plus tmux (and mosh, for typing over bad links) gives the same speed win in about fifteen minutes, on a WireGuard data plane that is formally verified and maintained by a company whose job it is, with phone, Windows and macOS clients and a better rate of direct paths. Choose it if you want an audited, mature tool now, need phones or other operating systems, or do not mind root and an account. jaunt is for when you want no root, no system VPN device, no account and no company that can add machines to your network. <a href="./manual/index.html#when-tailscale-is-the-better-choice">More in the manual</a></p>
+</section>
+
+<section id="install" class="install wrap" data-release="ZahakJ/jaunt" aria-labelledby="install-title">
+  <h2 id="install-title">Install</h2>
+  <p>On each machine, as the user who will use jaunt (the script refuses to run as root):</p>
+  <div class="codebox">
+<pre><code id="install-line">curl -fsSL https://raw.githubusercontent.com/ZahakJ/jaunt/main/install.sh | sh</code></pre>
+    <button type="button" class="copy" data-copy="install-line" hidden>Copy</button>
+  </div>
+  <p>Options pass through after <code>sh -s --</code>, for example <code>… | sh -s -- --name benzene</code>. Then look before setting anything up:</p>
+<pre class="plain"><code>jaunt demo</code></pre>
+  <p>It puts one static binary in <code>~/.local/bin</code> and nothing else unless you ask, and says whether that directory is on your <code>PATH</code>. No root. Linux x86_64 is the only platform with a release binary; everything else builds from source with <code>cargo build --release</code>.</p>
+
+  <div class="release">
+    <p class="release-line">Latest release <span data-release-tag>v0.1.2</span>, <time data-release-date datetime="2026-10-05">5 October 2026</time></p>
+    <p><a class="btn btn-primary" data-release-primary data-release-verb="Download" href="https://github.com/ZahakJ/jaunt/releases/latest">Download from the releases page</a></p>
+    <ul class="assets" data-release-assets>
+      <li><a href="https://github.com/ZahakJ/jaunt/releases/latest/download/jaunt-x86_64-linux-musl">Linux x86_64, static binary</a> <code>jaunt-x86_64-linux-musl</code></li>
+      <li><a href="https://github.com/ZahakJ/jaunt/releases/latest/download/jaunt-x86_64-linux-musl.sha256">SHA-256 checksum</a> <code>jaunt-x86_64-linux-musl.sha256</code></li>
+    </ul>
+    <p class="note">Releases are not signed. The checksum comes from the same place as the binary, so it catches a broken download, not a malicious release.</p>
+  </div>
+
+  <p><strong>The relay.</strong> Your machines need one relay, a small meeting point you host that introduces them and carries traffic when no direct path exists. It sees only encrypted data and can never add a machine. The cheapest option is free: your desktop, behind a Cloudflare tunnel you already have. <a href="./manual/relay.html">The relay chapter</a> compares the options.</p>
+  <p>Open source, free. MIT licence. Step by step: <a href="./manual/install.html">Install</a>, then <a href="./manual/pairing.html">Pairing</a>.</p>
+</section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <nav aria-label="Footer">
+      <ul>
+        <li><a href="./manual/">Manual</a></li>
+        <li><a href="https://github.com/ZahakJ/jaunt">Repository</a></li>
+        <li><a href="./manual/changelog.html">Changelog</a></li>
+        <li><a href="./manual/security.html">Security</a></li>
+      </ul>
+    </nav>
+    <p>The name: a jaunt is a short trip, and in Alfred Bester's <cite>The Stars My Destination</cite> "jaunting" is teleporting yourself somewhere by wanting to be there.</p>
+  </div>
+</footer>
+
+<script>
+window.releaseAssets = [
+  { test: /^jaunt-x86_64-linux-musl$/, os: 'any', label: 'Linux x86_64, static binary' },
+  { test: /\.sha256$/, os: 'any', label: 'SHA-256 checksum' }
+];
+(function () {
+  if (!navigator.clipboard || !window.isSecureContext) return;
+  document.querySelectorAll('button[data-copy]').forEach(function (b) {
+    b.hidden = false;
+    b.addEventListener('click', function () {
+      var src = document.getElementById(b.getAttribute('data-copy'));
+      navigator.clipboard.writeText(src.textContent).then(function () {
+        b.textContent = 'Copied';
+        setTimeout(function () { b.textContent = 'Copy'; }, 1600);
+      }, function () {});
+    });
+  });
+})();
+</script>
+<script src="release.js"></script>
+</body>
+</html>

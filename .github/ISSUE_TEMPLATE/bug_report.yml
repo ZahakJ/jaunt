@@ -1,0 +1,30 @@
+name: Bug report
+description: Something behaves differently from what the manual says
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, what happened instead. One bug per report.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: jaunt version and setup
+      placeholder: "jaunt 0.1.2; two Linux machines, relay on a VPS"
+    validations:
+      required: true
+  - type: textarea
+    id: check
+    attributes:
+      label: Output of `jaunt check`
+      description: Remove anything you consider private (hostnames, addresses). Machine ids are public keys and are safe to paste.
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Anything else
+      description: Daemon logs from `~/.local/state/jaunt/` if relevant, with private details removed.
+      render: text

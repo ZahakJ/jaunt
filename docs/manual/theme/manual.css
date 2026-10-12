@@ -1,0 +1,206 @@
+/* jaunt manual: the palette of the terminal UI (DESIGN §11), applied to mdBook's
+   light and navy themes. Every variable of mdBook 0.5's variables.css is set here. */
+
+:root {
+    --mono-font: ui-monospace, "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+    --sans-font: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+    --content-max-width: 760px;
+}
+
+.navy {
+    --bg: #1b1b26;
+    --fg: #d6d6e3;
+    --accent: #b4a0ff;
+    --muted: #8b8ea6;
+    --surface: #22222f;
+    --lines: #2e2e3d;
+
+    --sidebar-bg: #171720;
+    --sidebar-fg: #d6d6e3;
+    --sidebar-non-existant: #6c7086;
+    --sidebar-active: #b4a0ff;
+    --sidebar-spacer: #2e2e3d;
+
+    --scrollbar: #3a3a4d;
+
+    --icons: #8b8ea6;
+    --icons-hover: #b4a0ff;
+
+    --links: #6fe3e1;
+
+    --inline-code-color: #f2c97d;
+    --inline-code-bg: #22222f;
+
+    --theme-popup-bg: #22222f;
+    --theme-popup-border: #2e2e3d;
+    --theme-hover: #2e2e3d;
+
+    --quote-bg: #22222f;
+    --quote-border: #2e2e3d;
+
+    --warning-border: #f2c97d;
+
+    --table-border-color: #2e2e3d;
+    --table-header-bg: #2a2a3a;
+    --table-alternate-bg: #1f1f2b;
+
+    --searchbar-border-color: #2e2e3d;
+    --searchbar-bg: #22222f;
+    --searchbar-fg: #d6d6e3;
+    --searchbar-shadow-color: #0e0e14;
+    --searchresults-header-fg: #8b8ea6;
+    --searchresults-border-color: #2e2e3d;
+    --searchresults-li-bg: #22222f;
+    --search-mark-bg: #5b4bb8;
+
+    --color-scheme: dark;
+
+    --copy-button-filter: invert(60%) sepia(8%) saturate(600%) hue-rotate(195deg) brightness(92%) contrast(88%);
+    --copy-button-filter-hover: invert(72%) sepia(35%) saturate(1500%) hue-rotate(205deg) brightness(102%) contrast(101%);
+
+    --footnote-highlight: #6fe3e1;
+
+    --overlay-bg: rgba(10, 10, 16, 0.55);
+
+    --blockquote-note-color: #6fe3e1;
+    --blockquote-tip-color: #8ee6a0;
+    --blockquote-important-color: #b4a0ff;
+    --blockquote-warning-color: #f2c97d;
+    --blockquote-caution-color: #f28b9a;
+
+    --sidebar-header-border-color: #b4a0ff;
+}
+
+.light, html:not(.js) {
+    --bg: #f7f7fa;
+    --fg: #1f2033;
+    --accent: #5b4bb8;
+    --muted: #6b6f85;
+    --surface: #ffffff;
+    --lines: #dcdce6;
+
+    --sidebar-bg: #f0f0f5;
+    --sidebar-fg: #1f2033;
+    --sidebar-non-existant: #9a9db0;
+    --sidebar-active: #5b4bb8;
+    --sidebar-spacer: #dcdce6;
+
+    --scrollbar: #c4c4d2;
+
+    --icons: #6b6f85;
+    --icons-hover: #5b4bb8;
+
+    --links: #0b7f85;
+
+    --inline-code-color: #7a5a00;
+    --inline-code-bg: #efeff5;
+
+    --theme-popup-bg: #ffffff;
+    --theme-popup-border: #dcdce6;
+    --theme-hover: #ececf3;
+
+    --quote-bg: #ffffff;
+    --quote-border: #dcdce6;
+
+    --warning-border: #b07d00;
+
+    --table-border-color: #dcdce6;
+    --table-header-bg: #ececf3;
+    --table-alternate-bg: #fbfbfd;
+
+    --searchbar-border-color: #dcdce6;
+    --searchbar-bg: #ffffff;
+    --searchbar-fg: #1f2033;
+    --searchbar-shadow-color: #dcdce6;
+    --searchresults-header-fg: #6b6f85;
+    --searchresults-border-color: #dcdce6;
+    --searchresults-li-bg: #ffffff;
+    --search-mark-bg: #d9d2ff;
+
+    --color-scheme: light;
+
+    --copy-button-filter: invert(45%) sepia(9%) saturate(700%) hue-rotate(195deg) brightness(92%) contrast(88%);
+    --copy-button-filter-hover: invert(29%) sepia(52%) saturate(1800%) hue-rotate(232deg) brightness(88%) contrast(92%);
+
+    --footnote-highlight: #0b7f85;
+
+    --overlay-bg: rgba(31, 32, 51, 0.25);
+
+    --blockquote-note-color: #0b7f85;
+    --blockquote-tip-color: #2e8540;
+    --blockquote-important-color: #5b4bb8;
+    --blockquote-warning-color: #9a6b00;
+    --blockquote-caution-color: #c23a4e;
+
+    --sidebar-header-border-color: #5b4bb8;
+}
+
+/* Type */
+html { font-family: var(--sans-font); }
+body { font-size: 1.6rem; }
+.content { line-height: 1.6; }
+h1, h2, h3, h4, h5, h6, .menu-title {
+    font-family: var(--mono-font);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+}
+.navy .content h1, .light .content h1, html:not(.js) .content h1 { color: var(--accent); }
+.content h2, .content h3, .content h4 { color: var(--fg); }
+.content h2 { border-bottom: 1px solid var(--lines); padding-bottom: 0.2em; }
+.content .header:link, .content .header:visited { color: inherit; }
+code, pre, kbd { font-family: var(--mono-font); }
+
+/* Code */
+.navy pre, .navy pre > code, .navy .hljs,
+.light pre, .light pre > code, .light .hljs { background: var(--surface); color: var(--fg); }
+pre { border: 1px solid var(--lines); border-radius: 8px; }
+.navy :not(pre) > code, .light :not(pre) > code, html:not(.js) :not(pre) > code {
+    color: var(--inline-code-color);
+    background: var(--inline-code-bg);
+    padding: 0.1em 0.3em;
+    border-radius: 4px;
+}
+.navy a :not(pre) > code, .navy a > code { color: var(--links); }
+.light a > code { color: var(--links); }
+
+/* Blockquotes, used for warnings */
+blockquote { border-inline-start: 3px solid var(--accent); border-block: none; background: var(--quote-bg); border-radius: 0 8px 8px 0; }
+
+/* Tables */
+table { border-collapse: collapse; }
+table thead th { background: var(--table-header-bg); }
+table td, table th { border-color: var(--table-border-color); }
+
+/* Sidebar */
+.sidebar .chapter li a.active, .sidebar .chapter li a:hover { color: var(--sidebar-active); }
+.chapter li.chapter-item a.active { font-weight: 600; }
+
+/* Captures carry their own window frame */
+.content img { max-width: 100%; height: auto; border: none; border-radius: 10px; display: block; margin: 1em auto; }
+.content p > em:only-child { color: var(--muted); }
+
+/* The link back to the landing page, inserted by manual.js */
+.jaunt-home {
+    font-family: var(--mono-font);
+    font-weight: 700;
+    color: var(--accent) !important;
+    text-decoration: none;
+    margin-inline: 8px 4px;
+    align-self: center;
+    font-size: 1.6rem;
+}
+.jaunt-home:hover { text-decoration: underline; }
+
+/* Long paths and commands in running text wrap instead of widening the page */
+.content p code, .content li code { overflow-wrap: anywhere; }
+
+@media (max-width: 420px) {
+    .content { padding-inline: 4px; }
+    .content pre { font-size: 0.8em; }
+}
+
+/* On a phone the menu bar has room for either the home link or the full title; keep both short. */
+@media (max-width: 480px) {
+    .menu-title { font-size: 1.1rem; }
+    .jaunt-home { font-size: 0.95rem; }
+}

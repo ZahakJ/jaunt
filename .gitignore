@@ -4,3 +4,4 @@
 .session-id
 test/harness/.state/
 /dist/
+.scratch/

@@ -1,3 +1,12 @@
+<p align="center"><img src="docs/media/banner.png" alt="jaunt — sit at any of your machines and open a terminal on any other" width="820"></p>
+
+<p align="center">
+  <a href="https://github.com/ZahakJ/jaunt/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/ZahakJ/jaunt?color=b4a0ff&labelColor=1b1b26"></a>
+  <a href="LICENSE"><img alt="MIT licence" src="https://img.shields.io/badge/licence-MIT-6fe3e1?labelColor=1b1b26"></a>
+  <a href="https://zahakj.github.io/jaunt/manual/"><img alt="Manual" src="https://img.shields.io/badge/manual-read-8ee6a0?labelColor=1b1b26"></a>
+  <img alt="Platform: Linux x86_64 binary, others from source" src="https://img.shields.io/badge/binary-linux%20x86__64-f2c97d?labelColor=1b1b26">
+</p>
+
 # jaunt
 
 jaunt lets you sit at any of your own machines and open a terminal on any other one: `jaunt toluene` puts you in a tmux session on the machine called toluene, over a direct encrypted link when one can be made and through a relay you run when it cannot.
@@ -7,11 +16,11 @@ jaunt lets you sit at any of your own machines and open a terminal on any other 
 *`jaunt` with no arguments: the live mesh. Solid green is a direct path, dashed amber goes through the relay. (This picture is `jaunt demo`; try it before setting anything up.)*
 
 ```sh
-gh repo clone ZahakJ/jaunt && sh jaunt/install.sh --name benzene
+curl -fsSL https://raw.githubusercontent.com/ZahakJ/jaunt/main/install.sh | sh -s -- --name benzene
 ~/.local/bin/jaunt demo
 ```
 
-No root, one static binary in `~/.local/bin`. The repository is private, so the install uses the GitHub CLI (`gh auth login` first). Linux x86_64 has a release binary; anything else builds from source.
+One static binary in `~/.local/bin`, no root. Options to the installer go after `sh -s --`; without options, `| sh` is enough. Linux x86_64 has a release binary; anything else builds from source.
 
 > **Keep your Cloudflare tunnel for now.** jaunt is new, has had no outside security review, and has only been tested in a simulated network lab. Leave the SSH-through-Cloudflare path in place until jaunt has proven itself on your real machines.
 
@@ -19,22 +28,9 @@ No root, one static binary in `~/.local/bin`. The repository is private, so the 
 
 The example: a desktop called **benzene** and a laptop called **toluene**.
 
-### 1. A relay (one for all your machines, and it can be free)
+**1. A relay.** Your machines need one small meeting point on the internet that you run yourself. It introduces them to each other, carries the traffic when they cannot connect directly, and only ever sees encrypted data. One relay serves every machine you will ever link, and the cheapest option is free: your desktop, behind a Cloudflare tunnel you already have. The options, their costs, and why Fly.io gives no direct paths as shipped: [the relay chapter](https://zahakj.github.io/jaunt/manual/relay.html) and [deploy/relay/README.md](deploy/relay/README.md). No relay yet? [Try jaunt on one machine](docs/try-it.md) with a local test relay.
 
-Your machines need one small meeting point on the internet, the **relay**. It introduces them to each other and carries the traffic when they cannot connect directly. It only ever sees encrypted data. You run it yourself; one relay serves every machine you will ever link.
-
-| Where it runs | Cost | What you get |
-| --- | --- | --- |
-| your desktop, behind the Cloudflare tunnel you already have | free | works everywhere. Away from home, sessions go through the relay (about as fast as SSH is today); at home a direct path is expected |
-| a small VPS | a few dollars a month, or a free tier | direct paths from anywhere: the fast case |
-| your desktop, with two ports forwarded on the home router | free | direct paths from anywhere, but your home address becomes public |
-| Fly.io | paid add-on needed | **does not give direct paths as shipped**: Fly only delivers UDP to a specially bound socket, and the relay program cannot bind that way without a start script nobody has written or tested yet |
-
-Start with the first row: it costs nothing and exposes nothing new. Move to a VPS later if you want direct paths away from home; switching is one command. Steps for each option, and the full Fly.io explanation: [deploy/relay/README.md](deploy/relay/README.md).
-
-No relay yet? [Try jaunt on one machine](docs/try-it.md) with a local test relay.
-
-### 2. On the desktop (benzene)
+**2. On the desktop (benzene):**
 
 ```sh
 jaunt relay set https://relay.example.net
@@ -44,10 +40,10 @@ jaunt link      # shows a code like 4127-tremor-kudos
 
 ![The code screen of jaunt link](captures/link-code-80x24-truecolor.png)
 
-### 3. On the laptop (toluene)
+**3. On the laptop (toluene):**
 
 ```sh
-gh repo clone ZahakJ/jaunt && sh jaunt/install.sh --name toluene
+curl -fsSL https://raw.githubusercontent.com/ZahakJ/jaunt/main/install.sh | sh -s -- --name toluene
 jaunt up
 jaunt join --relay https://relay.example.net     # asks for the code; type it
 ```
@@ -78,24 +74,11 @@ All commands: [docs/commands.md](docs/commands.md). Using it from inside tmux (a
 
 ## Laptops that stay reachable
 
-A laptop that sleeps when its lid closes cannot be hopped into. On the laptop:
-
-```sh
-jaunt host on
-jaunt host status     # says what closing the lid would do right now
-```
-
-It then stays awake with the lid closed **only while it is plugged in and not too hot**. On battery, when hot, or when jaunt cannot tell, it sleeps as usual, so it will not cook in a bag. Linux only, and not yet tried on a real laptop. Details and the safety rules: [docs/awake.md](docs/awake.md).
+A laptop that sleeps when its lid closes cannot be hopped into. `jaunt host on` on the laptop keeps it awake with the lid closed **only while it is plugged in and not too hot**; `jaunt host status` says what closing the lid would do right now. On battery, when hot, or when jaunt cannot tell, it sleeps as usual, so it will not cook in a bag. Linux only, and not yet tried on a real laptop. Details and the safety rules: [docs/awake.md](docs/awake.md).
 
 ## If a laptop is lost
 
-From any other machine:
-
-```sh
-jaunt unlink toluene --kill-sessions
-```
-
-It is cut off at once on every machine that is online, and the output lists any machine that has not heard yet. What this does and does not undo: [docs/security.md](docs/security.md#revoking-a-lost-laptop).
+From any other machine, `jaunt unlink toluene --kill-sessions`. It is cut off at once on every machine that is online, and the output lists any machine that has not heard yet. What this does and does not undo: [docs/security.md](docs/security.md#revoking-a-lost-laptop).
 
 ## How it works, briefly
 
@@ -111,25 +94,20 @@ Each machine runs a small background service holding its own key. Machines only 
 ## What you should know before trusting it
 
 - **Tested only in simulation.** A Docker lab with three machines behind simulated home routers passes 250 end-to-end checks. No real laptop, lid, relay server, home network or Mac has run it. [What was tested](docs/testing.md) · [First real-world test checklist](docs/first-real-test.md)
-- **No outside audit.** Not of jaunt, nor of the iroh library under it. A stolen, unlocked laptop is a full member until you revoke it. [Security, threat model and the comparison with Cloudflare and Tailscale](docs/security.md)
+- **No outside audit.** Not of jaunt, nor of the iroh library under it, nor of the SPAKE2 crate the pairing uses. Releases are not signed: the installer's checksum comes from the same place as the binary, so it catches a broken download, not a malicious release. A stolen, unlocked laptop is a full member until you revoke it. [Security, threat model and the comparison with Cloudflare and Tailscale](docs/security.md)
 - **Speed.** In the lab a keystroke took 81 ms on jaunt's direct path against 121 to 139 ms for SSH through a relay host, with 20 ms of simulated delay per router. The gain is the direct path; through the relay jaunt is no faster than SSH. [Numbers and method](docs/testing.md)
-- **Choices made for you, and the ones that are yours** (where the relay runs, making this repository public, when to retire the Cloudflare path): [docs/decisions.md](docs/decisions.md)
+- **Choices made for you, and the ones that are yours** (where the relay runs, when to retire the Cloudflare path): [docs/decisions.md](docs/decisions.md)
 
-## More
+## Documents
 
-| | |
-| --- | --- |
-| [docs/commands.md](docs/commands.md) | every command, getting out and back |
-| [docs/tmux.md](docs/tmux.md) | the tmux snippet, nested tmux for beginners |
-| [docs/awake.md](docs/awake.md) | lid-closed hosting in full |
-| [docs/security.md](docs/security.md) | threat model, comparisons, revoking |
-| [docs/testing.md](docs/testing.md), [docs/first-real-test.md](docs/first-real-test.md) | measurements, what was and was not tested, the real-world checklist |
-| [deploy/relay/README.md](deploy/relay/README.md) | hosting the relay |
-| [docs/try-it.md](docs/try-it.md) | two pretend machines on one computer |
-| [docs/DESIGN.md](docs/DESIGN.md), [docs/internals.md](docs/internals.md), [docs/research/](docs/research/) | design, internals, the survey of alternatives |
+- The home page: <https://zahakj.github.io/jaunt/>
+- The manual: <https://zahakj.github.io/jaunt/manual/>. Chapters: install, pairing, hopping, host mode, the relay, try it on one machine, security model, internals, troubleshooting, what was tested, decisions, changelog.
+- In this repository: [docs/DESIGN.md](docs/DESIGN.md) (the design), [docs/security.md](docs/security.md), [docs/testing.md](docs/testing.md), [docs/research/](docs/research/) (the survey of alternatives), [deploy/relay/README.md](deploy/relay/README.md) (hosting the relay).
 
 **Uninstall:** `jaunt uninstall` (asks before deleting the key), then `jaunt unlink <name>` from another machine.
 
 **Build from source:** `cargo build --release`; tests with `cargo test`; the lab with `test/e2e/run-all.sh` (Docker, no root).
+
+**Contributing and reporting security problems:** [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md).
 
 License: MIT.

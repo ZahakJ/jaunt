@@ -17,7 +17,7 @@
 
 ### Yours to make
 
-- **Where to host the relay.** A small VPS is recommended ([`deploy/relay/README.md`](../deploy/relay/README.md)). Fly.io does not work for this as shipped. The desktop behind the Cloudflare tunnel works only as a relay of last resort (no direct paths through it).
-- **Making the repository public.** It is private at `github.com/ZahakJ/jaunt`. The published history contains no path, hostname or address of your machines (one early commit did; it was rewritten before the first push).
+- **Where to host the relay.** A small VPS is recommended ([`deploy/relay/README.md`](https://github.com/ZahakJ/jaunt/blob/main/deploy/relay/README.md)). Fly.io does not work for this as shipped. The desktop behind the Cloudflare tunnel works only as a relay of last resort (no direct paths through it).
+- **Making the repository public.** It has been public at `github.com/ZahakJ/jaunt` since 11 October 2026. The published history contains no path, hostname or address of your machines (one early commit did; it was rewritten before the first push).
 - **When to retire the Cloudflare path.** Not before the real-world test above has passed and jaunt has been used for a while.
 - Whether the remaining gaps matter enough to fix: the revocation window when no informed machine is reachable, the slow roam after an outage, signed releases.
