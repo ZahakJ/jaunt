@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run the harness e2e scripts (01-09) against one harness: up once, each script in turn,
-# down at the end, then a summary. The lab is shared: the lock is taken per script and
-# released between scripts (no stretch longer than one script), the harness stays up.
+# down at the end, then a summary. Each script takes the harness lock and releases it
+# when done; the harness stays up between scripts.
 #   JAUNT_BIN=target/release/jaunt test/e2e/run-all.sh [04 07 ...]   (default: all)
 set -uo pipefail
 E2E_NAME=run-all

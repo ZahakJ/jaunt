@@ -1,4 +1,4 @@
-//! Revocation (DESIGN §7), daemon side: `unlink` tombstones machines here (which at once
+//! Revocation (design §7), daemon side: `unlink` tombstones machines here (which at once
 //! closes their connections and ends their processes, see `Daemon::roster_changed`), then
 //! pushes the tombstones to every other member and reports who confirmed. `leave` pushes
 //! this machine's own tombstone first and applies it here last, so the pushes still go out.

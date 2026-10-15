@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::paths::Paths;
 
-/// One argument for a unit file line, quoted so systemd reads it back unchanged (L11):
+/// One argument for a unit file line, quoted so systemd reads it back unchanged:
 /// in double quotes, with `\` and `"` escaped and `%` (a specifier) doubled; on a command
 /// line (`exec`) also `$` doubled, which ExecStart= would expand as a variable.
 fn sd_quote(s: &str, exec: bool) -> Result<String> {
@@ -34,7 +34,7 @@ pub fn unit_text(exe: &Path, paths: &Paths) -> Result<String> {
     };
     Ok(format!(
         "[Unit]\n\
-         Description=jaunt daemon (links this machine to the owner's other machines)\n\
+         Description=jaunt daemon\n\
          After=network-online.target\n\
          \n\
          [Service]\n\
@@ -137,7 +137,7 @@ pub fn watchdog_interval() -> Option<Duration> {
 mod tests {
     use super::*;
 
-    /// L11: a space, a `%`, a quote or a backslash in a path cannot change what systemd runs.
+    /// A space, a `%`, a quote or a backslash in a path cannot change what systemd runs.
     #[test]
     fn unit_paths_are_quoted_and_specifiers_escaped() {
         let p = Paths::under(Path::new("/x/jaunt home%h"));

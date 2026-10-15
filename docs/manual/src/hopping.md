@@ -43,16 +43,16 @@ A hop needs a terminal. To run something from a script, use `jaunt run`.
 | `jaunt fwd toluene 8080:9090` | the same, but here at port 9090 |
 | `jaunt pipe toluene [port]` | connect stdin and stdout to a port on toluene's loopback (default 22) |
 
-Two things to know about `fwd`: it reaches only toluene's loopback (`127.0.0.1`), and the local end listens on `127.0.0.1` here, so every user of this machine can use the forwarded port while it runs, as with `ssh -L`. On a shared machine, forward only what anyone there may reach.
+`fwd` reaches only toluene's loopback. The local end listens on `127.0.0.1`, so every user of this machine can use the port while it runs, as with `ssh -L`.
 
-`jaunt pipe` exists to put real OpenSSH on top of jaunt. On machines where sshd listens on loopback, this in `~/.ssh/config` makes `ssh`, `scp`, `rsync` and `git` travel through jaunt, with SSH's own key check as a second, independent layer:
+`jaunt pipe` carries OpenSSH. Where sshd listens on loopback, this in `~/.ssh/config` sends `ssh`, `scp`, `rsync` and `git` through jaunt, with SSH's key check as a second layer:
 
 ```
 Host benzene toluene xylene phenol
     ProxyCommand jaunt pipe %h
 ```
 
-The `Host` names must be jaunt machine names. The [Security model](security.md) explains why you might want the second layer.
+The `Host` names must be jaunt machine names.
 
 ## Onward hops
 
@@ -62,8 +62,6 @@ Every machine is a full member, so you can hop from where you are. Inside a hop 
 | --- | --- |
 | `JAUNT_FROM` | the machine you came from |
 | `JAUNT_MACHINE` | the machine you are on |
-
-They are handy in a shell prompt, so you can always see where you are.
 
 ## Getting out and back
 
@@ -85,7 +83,7 @@ On the way out a banner says where you are again: `◂━━ back on benzene · 
 
 ## When the link drops
 
-A change of network (Wi-Fi to a phone hotspot) is absorbed by QUIC: the connection moves to the new path, and in the lab typing worked again within half a second. Nothing on your screen changes except the path in `jaunt ls`.
+A change of network (Wi-Fi to a phone hotspot) is absorbed by QUIC: the connection moves to the new path, and typing resumes within about half a second. Nothing on your screen changes except the path in `jaunt ls`.
 
 When the connection is really lost (the lid closed, the Wi-Fi gone), jaunt keeps your terminal and shows one status line at the bottom:
 
@@ -103,15 +101,10 @@ toluene ╌ no answer for 5s · waiting for the link · ~. to give up
 
 It disappears as soon as output arrives. A program that is simply quiet on a live link, such as a password prompt, does not trigger it.
 
-Two limits, both measured in the lab and described in [What was tested](testing.md):
-
-- **No predictive echo.** On a relayed path every keystroke waits for the trip through the relay and back, just as with SSH. mosh's trick of echoing locally is not in jaunt.
-- **A slow roam after an outage.** Moving to a new network right after a long outage took 17 to 49 seconds in the lab, because iroh backs off its relay reconnects and a network change does not cut that short. jaunt shows the waiting line meanwhile but cannot shorten the wait.
-
 Without tmux on the far machine, a hop is a plain login shell, and it ends when the link drops. `jaunt check` on that machine warns about it.
 
 ## Using jaunt from tmux
 
-A hop from inside tmux works without any setup. The snippet below adds two keys that make it pleasant: a popup picker that opens each machine in its own window, and a switch that hands your keys to the tmux on the other machine. Without the snippet, jaunt prints a one-time hint the first time you hop from inside tmux. The rest of this section is `docs/tmux.md` from the repository.
+A hop from inside tmux works without setup. The snippet below adds a popup picker that opens each machine in its own window, and a key that hands your keys to the tmux on the other machine.
 
 {{#include ../../tmux.md:2:}}

@@ -12,6 +12,3 @@ preferred-dark-theme = "navy"
 additional-css = ["theme/manual.css"]
 additional-js = ["theme/manual.js"]
 
-# docs/security.md links to research/survey.md, which is not part of the manual.
-[output.html.redirect]
-"/research/survey.html" = "https://github.com/ZahakJ/jaunt/blob/main/docs/research/survey.md"

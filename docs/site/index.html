@@ -55,7 +55,7 @@
 <span class="ln"><span class="prompt">$</span> jaunt phenol</span>
 <span class="ln"><span class="t-dim">benzene</span> <span class="t-relay">╌╌<b>▸</b></span> <b class="t-target">phenol</b><span class="t-sep"> · </span><span class="t-relay">relay</span><span class="t-sep"> · </span><span class="t-bright">48 ms</span></span>
 <span class="ln"><span class="t-accent">◂━━</span> back on <b class="t-accent">benzene</b></span></pre>
-    <figcaption id="hop-caption"><code>jaunt demo hop</code>, v0.1.2: the demo prints the real client's output on made-up machines. The pictures below are <code>jaunt demo</code> too; try it before setting anything up.</figcaption>
+    <figcaption id="hop-caption"><code>jaunt demo hop</code></figcaption>
   </figure>
 </section>
 
@@ -66,8 +66,8 @@
     </figure>
     <div class="text">
       <h2>The live mesh</h2>
-      <p>Type <code>jaunt</code> with no arguments and you see every machine you have linked, drawn from the one you sit at. A solid green line is a direct path between the two machines. A dotted amber line goes through the relay. A greyed-out machine is offline.</p>
-      <p>Each link carries its latency and a sparkline of the last minute, and the log underneath says what happened: a laptop roamed to a new network, a relayed path upgraded to a direct one. Arrows to choose a machine, Enter to hop, <kbd>q</kbd> to quit.</p>
+      <p><code>jaunt</code> with no arguments draws every linked machine from the one you sit at. Solid green is a direct path, dotted amber goes through the relay, grey is offline.</p>
+      <p>Each link shows its latency and a sparkline of the last minute; the log underneath records roams, syncs and path upgrades. Arrows choose, Enter hops, <kbd>q</kbd> quits.</p>
     </div>
   </article>
 
@@ -77,8 +77,8 @@
     </figure>
     <div class="text">
       <h2>Linking two machines</h2>
-      <p><code>jaunt link</code> on one machine shows a short code like <code>4127-tremor-kudos</code>. Type it on the other with <code>jaunt join</code>. Both screens then show the same small picture and the same three words. If they match, press <kbd>y</kbd> on both; if not, press <kbd>n</kbd>.</p>
-      <p>Underneath is SPAKE2, a password-authenticated key exchange with the code as the password. Someone in the middle gets exactly one guess per code, 1 in 60 million; a wrong guess burns the code, and codes expire after 5 minutes. The picture is the second, human check.</p>
+      <p><code>jaunt link</code> shows a code like <code>4127-tremor-kudos</code>; type it on the other machine with <code>jaunt join</code>. Both screens show the same sigil and three words; press <kbd>y</kbd> on both if they match.</p>
+      <p>The code is the password for SPAKE2: someone in the middle gets one guess in 60 million, a wrong guess burns the code, and codes expire after 5 minutes.</p>
     </div>
   </article>
 
@@ -87,10 +87,10 @@
       <img src="captures/ls-100x28-truecolor.png" width="936" height="306" loading="lazy" alt="The output of jaunt ls: toluene and xylene direct at 21 and 10 ms, phenol relayed at 44 ms and on battery, styrene offline and seen 2 hours ago with lid sleeps, toluene marked awake; summary line 2 direct, 1 relayed, 1 offline.">
     </figure>
     <div class="text">
-      <h2>The roster, and laptops that stay reachable</h2>
-      <p><code>jaunt ls</code> prints every machine: direct, relayed or offline, its latency, its sessions, and what its lid would do.</p>
-      <p>A laptop that sleeps cannot be hopped into. <code>jaunt host on</code> keeps it awake with the lid closed <strong>only while it is plugged in and not too hot</strong>; on battery, when hot, or when jaunt cannot tell, it sleeps as usual, so it will not cook in a bag. No real laptop has run this yet.</p>
-      <p>If a laptop is lost, <code>jaunt unlink toluene --kill-sessions</code> from any other machine cuts it off at once on every machine that is online, and lists any machine that has not heard yet.</p>
+      <h2>The roster</h2>
+      <p><code>jaunt ls</code> lists every machine with its path, latency, sessions and host state.</p>
+      <p><code>jaunt host on</code> keeps a laptop awake with the lid closed while it is on mains and below a heat limit; otherwise it sleeps as usual.</p>
+      <p><code>jaunt unlink toluene --kill-sessions</code> revokes a lost machine on every machine that is online and lists those that have not heard yet.</p>
     </div>
   </article>
 </section>
@@ -104,34 +104,21 @@
   <div class="cols">
     <p>Each machine runs a small background service holding its own key.</p>
     <p>Machines only accept keys on the shared member list, checked during the encrypted handshake.</p>
-    <p>The networking and encryption come from the <a href="https://iroh.computer">iroh</a> library, not from jaunt; jaunt adds the linking ritual, the member list and revocation, the hop commands, the mesh view and the lid guard.</p>
-    <p>Sessions live in tmux on the far machine, which is why they survive disconnects.</p>
+    <p>Networking and encryption come from <a href="https://iroh.computer">iroh</a>.</p>
+    <p>Sessions live in tmux on the far machine and survive disconnects.</p>
   </div>
-</section>
-
-<section class="trust wrap" aria-labelledby="trust-title">
-  <h2 id="trust-title">Before you trust it</h2>
-  <p class="warn"><strong>Keep your existing SSH path for now.</strong> jaunt is new, has had no outside security review, and has only been tested in a simulated network lab. Leave the way you reach your machines today (for example SSH through a Cloudflare tunnel) in place until jaunt has proven itself on your real machines.</p>
-  <ul class="facts">
-    <li><strong>Tested only in simulation.</strong> A Docker lab with three machines behind simulated home routers passes 250 end-to-end checks. No real laptop, lid, relay server, home network or Mac has run it. <a href="./manual/testing.html">What was tested</a></li>
-    <li><strong>No outside audit.</strong> Not of jaunt, not of the iroh library under it, and not of the SPAKE2 crate the pairing uses. A stolen, unlocked laptop is a full member until you revoke it. <a href="./manual/security.html">Security model</a></li>
-    <li><strong>Unsigned releases.</strong> The installer checks the binary against a checksum that comes from the same place as the binary. That catches a broken download, not a malicious release.</li>
-    <li><strong>Speed.</strong> In the lab a keystroke took 81 ms on jaunt's direct path against 121 to 139 ms for SSH through a relay host, with 20 ms of simulated delay per router. The gain is the direct path; through the relay jaunt is no faster than SSH. <a href="./manual/measurements.html">Numbers and method</a></li>
-    <li><strong>Choices made for you, and the ones that are yours</strong>: where the relay runs, and when to retire the path you use today. <a href="./manual/decisions.html">Decisions</a></li>
-  </ul>
-  <p class="aside"><strong>When Tailscale is the better choice.</strong> Tailscale's free plan plus tmux (and mosh, for typing over bad links) gives the same speed win in about fifteen minutes, on a WireGuard data plane that is formally verified and maintained by a company whose job it is, with phone, Windows and macOS clients and a better rate of direct paths. Choose it if you want an audited, mature tool now, need phones or other operating systems, or do not mind root and an account. jaunt is for when you want no root, no system VPN device, no account and no company that can add machines to your network. <a href="./manual/index.html#when-tailscale-is-the-better-choice">More in the manual</a></p>
 </section>
 
 <section id="install" class="install wrap" data-release="ZahakJ/jaunt" aria-labelledby="install-title">
   <h2 id="install-title">Install</h2>
-  <p>On each machine, as the user who will use jaunt (the script refuses to run as root):</p>
+  <p>On each machine, as your user:</p>
   <div class="codebox">
 <pre><code id="install-line">curl -fsSL https://raw.githubusercontent.com/ZahakJ/jaunt/main/install.sh | sh</code></pre>
     <button type="button" class="copy" data-copy="install-line" hidden>Copy</button>
   </div>
-  <p>Options pass through after <code>sh -s --</code>, for example <code>… | sh -s -- --name benzene</code>. Then look before setting anything up:</p>
+  <p>Options go after <code>sh -s --</code>, e.g. <code>… | sh -s -- --name benzene</code>. Then:</p>
 <pre class="plain"><code>jaunt demo</code></pre>
-  <p>It puts one static binary in <code>~/.local/bin</code> and nothing else unless you ask, and says whether that directory is on your <code>PATH</code>. No root. Linux x86_64 is the only platform with a release binary; everything else builds from source with <code>cargo build --release</code>.</p>
+  <p>One static binary in <code>~/.local/bin</code>, no root. Linux x86_64 has a release binary; elsewhere, <code>cargo build --release</code>.</p>
 
   <div class="release">
     <p class="release-line">Latest release <span data-release-tag>v0.1.2</span>, <time data-release-date datetime="2026-10-05">5 October 2026</time></p>
@@ -140,11 +127,10 @@
       <li><a href="https://github.com/ZahakJ/jaunt/releases/latest/download/jaunt-x86_64-linux-musl">Linux x86_64, static binary</a> <code>jaunt-x86_64-linux-musl</code></li>
       <li><a href="https://github.com/ZahakJ/jaunt/releases/latest/download/jaunt-x86_64-linux-musl.sha256">SHA-256 checksum</a> <code>jaunt-x86_64-linux-musl.sha256</code></li>
     </ul>
-    <p class="note">Releases are not signed. The checksum comes from the same place as the binary, so it catches a broken download, not a malicious release.</p>
-  </div>
+      </div>
 
-  <p><strong>The relay.</strong> Your machines need one relay, a small meeting point you host that introduces them and carries traffic when no direct path exists. It sees only encrypted data and can never add a machine. The cheapest option is free: your desktop, behind a Cloudflare tunnel you already have. <a href="./manual/relay.html">The relay chapter</a> compares the options.</p>
-  <p>Open source, free. MIT licence. Step by step: <a href="./manual/install.html">Install</a>, then <a href="./manual/pairing.html">Pairing</a>.</p>
+  <p>A mesh needs one self-hosted relay (<code>iroh-relay</code>): see <a href="./manual/relay.html">the relay</a>.</p>
+  <p>MIT licence. Next: <a href="./manual/install.html">Install</a>, <a href="./manual/pairing.html">Pairing</a>.</p>
 </section>
 
 </main>

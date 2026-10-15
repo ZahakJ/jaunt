@@ -3,7 +3,7 @@
 //! stuck sysfs read or child process cannot stall the async runtime.
 //!
 //! A hung sensor (a sysfs read in a driver that never returns) must not leave the lock
-//! held (L3). So: the sensors are read on a helper thread with a deadline, and a reading
+//! held. So: the sensors are read on a helper thread with a deadline, and a reading
 //! that does not come back in time counts as "unknown", which releases the lock. And if the
 //! guard thread itself stops ticking, the daemon's failsafe kills the lock holder by its
 //! process id (`Handle::failsafe`), with or without systemd; under systemd the watchdog
@@ -69,7 +69,7 @@ pub struct Guard<B: Backend> {
     pub state: State,
     /// macOS: no sensors or lid lock; hold caffeinate while on.
     pub mac: bool,
-    /// A CPU temperature sensor was readable since host mode went on (L12).
+    /// A CPU temperature sensor was readable since host mode went on.
     pub cpu_seen: bool,
     /// Sensor reader threads currently stuck in a read.
     pub stuck: Arc<AtomicUsize>,
@@ -105,7 +105,7 @@ impl<B: Backend> Guard<B> {
         let any_cpu = sensors.iter().any(|s| s.cpu);
         let heat = if self.cpu_seen && !any_cpu && !sensors.is_empty() {
             // The CPU sensors went away; judging by a cool drive or Wi-Fi chip would hide
-            // a hot CPU (L12).
+            // a hot CPU.
             thermal::Heat::Unknown("the CPU temperature sensors stopped answering".into())
         } else {
             thermal::assess(&sensors, self.heat)
@@ -203,7 +203,7 @@ impl Handle {
     pub fn report(&self) -> HostReport {
         let mut r = self.report.lock().map(|r| r.clone()).unwrap_or_else(|_| off_report("the host-mode guard failed"));
         if !self.alive() && r.state != HostState::Off {
-            // Never show a stale "awake" (L3).
+            // Never show a stale "awake".
             let age = self.epoch.elapsed().saturating_sub(Duration::from_millis(self.last_tick.load(Ordering::Relaxed)));
             r.state = HostState::WillSleep;
             r.reason = format!("the host-mode guard has not answered for {} s; the lid lock was let go", age.as_secs());
@@ -214,7 +214,7 @@ impl Handle {
     }
 
     /// Called by the daemon every few seconds, whatever runs it: if the guard thread is
-    /// stuck, kill the lock holder by its pid so logind drops the lock (L3). The holder is
+    /// stuck, kill the lock holder by its pid so logind drops the lock. The holder is
     /// the guard's own unreaped child, so its pid cannot have been reused.
     pub fn failsafe(&self) {
         if self.alive() {

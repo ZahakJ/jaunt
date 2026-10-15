@@ -1,10 +1,10 @@
 //! Small daemon state kept across restarts, in the state directory (0600 files):
 //!
-//! - `addrs.json` (H2): each peer's last working direct addresses and this machine's own
+//! - `addrs.json`: each peer's last working direct addresses and this machine's own
 //!   last UDP port. They are only ever dial *hints*: iroh still authenticates the peer by
 //!   its key, so a stale or wrong address costs a failed attempt and nothing else. With
 //!   them a restarted daemon can find a peer on the same direct path while the relay is down.
-//! - `tmux-owners.json` (H9): which machine created which tmux session here, so that
+//! - `tmux-owners.json`: which machine created which tmux session here, so that
 //!   `jaunt unlink --kill-sessions` can end the sessions a revoked machine started.
 
 use std::collections::BTreeMap;

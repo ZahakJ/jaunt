@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Services (DESIGN §5, §8) in the Docker NAT harness, on the direct path (a <-> b) and the
+# Services (design §5, §8) in the Docker NAT harness, on the direct path (a <-> b) and the
 # relayed path (a <-> c): run (stdio, exit status, a client that leaves ends the command),
 # cp both ways with checksums (a tree with modes and a link, and a 200 MB file whose
 # throughput is recorded), fwd to a web server on the far loopback, and pipe as an ssh

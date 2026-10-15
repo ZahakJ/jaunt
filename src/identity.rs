@@ -1,5 +1,5 @@
 //! The machine's secret key: 32 raw bytes in a 0600 file. A key file that other users can
-//! read is refused rather than silently fixed, so the owner notices.
+//! read is refused rather than silently fixed, so the user notices.
 
 use std::fs;
 use std::io::{Read, Write};

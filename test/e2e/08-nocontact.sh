@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# "Contacts nothing but the relay and the peers" (DESIGN §2, §14), proved from outside the
+# "Contacts nothing but the relay and the peers" (design §2, §14), proved from outside the
 # process: before any daemon starts, every machine and every router logs each new flow
 # (conntrack events), and each machine counts its own outgoing packets by destination class
 # with iptables (relay, peer router, peer LAN, loopback, other). Then the mesh is set up and

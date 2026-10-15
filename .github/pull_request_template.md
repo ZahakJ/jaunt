@@ -6,7 +6,7 @@
 
 - [ ] `cargo fmt --check`, `cargo clippy`, `cargo test` pass
 - [ ] The Docker lab (`test/e2e/run-all.sh`) passes if the change touches the daemon, pairing, the roster or the shell
-- [ ] `docs/DESIGN.md`, `docs/security.md` or the manual (`docs/manual/`) updated if behaviour changed
+- [ ] `docs/design.md`, `docs/security.md` or the manual (`docs/manual/`) updated if behaviour changed
 
 ## Security
 

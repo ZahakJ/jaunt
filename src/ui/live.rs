@@ -62,7 +62,7 @@ fn open_window(name: &str) -> Result<i32> {
         bail!("'{name}' is not a machine name jaunt can pass to tmux");
     }
     let exe = std::env::current_exe()?;
-    // By absolute path (L2), never through an empty or relative PATH entry.
+    // By absolute path, never through an empty or relative PATH entry.
     let tmux = crate::shell::which("tmux").ok_or_else(|| anyhow::anyhow!("tmux is not on PATH"))?;
     let status = std::process::Command::new(tmux).arg("new-window").arg("-n").arg(name).arg(exe).arg("hop").arg(name).status()?;
     Ok(if status.success() { 0 } else { 1 })

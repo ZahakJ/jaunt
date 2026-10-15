@@ -1,6 +1,6 @@
 #!/bin/sh
-# Run the jaunt relay on this desktop, on loopback only, as a systemd user service.
-# A Cloudflare tunnel you already have then carries it (option A in README.md).
+# Run the jaunt relay on this machine, on loopback only, as a systemd user service.
+# An existing Cloudflare tunnel then carries it (see README.md).
 #
 #   sh desktop-tunnel.sh install [PATH-TO-iroh-relay]   set up and start
 #   sh desktop-tunnel.sh status                         is it running, does it answer

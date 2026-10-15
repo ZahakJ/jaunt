@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Session continuity (DESIGN §8) in the Docker NAT harness. One interactive hop a -> b stays
+# Session continuity (design §8) in the Docker NAT harness. One interactive hop a -> b stays
 # open while the lab disrupts it: the client's link blackholed for 10 s and for 60 s, the
 # client roamed to another LAN and back, the client frozen for 90 s, the host frozen for
 # 90 s, and the host's daemon restarted. After each, the same shell (a variable set at the

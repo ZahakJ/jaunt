@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Paths (DESIGN §2, §5) in the Docker NAT harness: a <-> b direct; c behind the hard NAT is
+# Paths (design §2, §5) in the Docker NAT harness: a <-> b direct; c behind the hard NAT is
 # relayed in both hard modes (symmetric NAT, and UDP blocked except to the relay); with the
 # relay down an existing direct stream keeps flowing, and what happens to new connections
 # is recorded; a daemon restarted while the relay is down is found again on the same direct

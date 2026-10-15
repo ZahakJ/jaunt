@@ -8,7 +8,7 @@
 //! Everything unknown counts against holding: unknown power, no readable temperature.
 //!
 //! Durations ("hot for 120 s", "on battery for 10 s", "draining for 60 s") are leaky
-//! accumulators, not "since the condition last became true" (L4): the time between two
+//! accumulators, not "since the condition last became true": the time between two
 //! samples counts towards a condition that held at the earlier sample, and time without it
 //! pays the total back at half speed. So heat that dips below the limit for one sample
 //! every two minutes still trips, and a flapping cable or a weak charger still releases.

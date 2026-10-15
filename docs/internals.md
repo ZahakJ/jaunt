@@ -1,15 +1,14 @@
 # jaunt internals
 
-DESIGN.md is the contract; this file records how it was implemented (stage 1: core,
-stage 2: trust, stage 3: look, host mode, services; stage 4: integration, release) and the
-APIs modules consume from each other.
+How jaunt is implemented, and the APIs modules consume from each other. Section numbers
+(§4 and so on) refer to `docs/design.md`.
 
 ## Files and paths (`src/paths.rs`)
 
 With `JAUNT_HOME=<dir>` (must be absolute) everything lives under it:
 `config/config.toml`, `data/{key,roster.json,daemon.lock}`,
 `state/{daemon.log,events.jsonl,addrs.json,tmux-owners.json}`, `run/sock`,
-`config/systemd/user/jaunt.service`. Without it, the XDG paths of DESIGN §4
+`config/systemd/user/jaunt.service`. Without it, the XDG paths of §4
 (`$XDG_RUNTIME_DIR/jaunt/sock`, fallback `~/.local/state/jaunt/run/`).
 Directories are 0700 and must be real directories owned by the user (a symlink or a
 foreign owner is refused); key/roster/config/socket and the state files 0600. Writes are
@@ -22,7 +21,7 @@ is its own and whose server runs as its uid (`SO_PEERCRED`). A detached daemon's
 
 `config.toml` keys: `name`, `relays` (bootstrap list), `relay_ca` (PEM path),
 `default_session`, `tmux_socket` (env `JAUNT_TMUX_SOCKET` wins), `portmap` (UPnP / NAT-PMP /
-PCP; **off by default everywhere**, since it changes the owner's router; `portmapper` is
+PCP; off by default; `portmapper` is
 read as an alias; `jaunt check` mentions it when no peer is direct), `port` (fixed UDP
 port; without it the daemon re-binds the port it used last time when that is free).
 `JAUNT_RELAY` (comma list) is used when the config has no relays.
@@ -33,8 +32,7 @@ are applied live (`Endpoint::insert_relay/remove_relay`); a new `relay_ca` needs
 restart. The endpoint is always built with a relay transport (`RelayMode::custom` with the
 list, empty if there is none, never `RelayMode::Disabled`), so a daemon that started with
 no relay connects as soon as one is set; `jaunt relay set` waits up to 10 s and says
-whether the daemon is connected to the relay. (Before, such a daemon stayed "not connected
-to any relay" until restarted; `00-host.sh` covers it.)
+whether the daemon is connected to the relay.
 
 ## Wire (`src/proto.rs`)
 
@@ -126,7 +124,7 @@ opened here by a peer), `refused {reason}` (a stream from a peer was refused: ba
 "peer":"<id>","sample":{t_ms, rtt_ms, path}}` once per second per connected peer; they are
 live-only, not history. Events are also appended to `state/events.jsonl` (rotated at 1 MiB).
 
-Stage 2 kinds: `pair {role, step, ...}` (the same steps as the IPC `pair` messages; the
+Trust kinds: `pair {role, step, ...}` (the same steps as the IPC `pair` messages; the
 `waiting` step's code is logged as `NNNN-…`, never the words), `revoked {by, sessions_killed,
 added}` with `peer` = the revoked machine (emitted on every machine as the tombstone arrives,
 locally or by sync; `added` = members it added, still linked), `told {ok, detail}` with `peer`
@@ -176,7 +174,7 @@ way to see the stream.
 - Every adopted connection is tracked per peer until it closes; a revocation closes all of
   them. A new connection from a peer replaces (and closes) any older one except inside the
   simultaneous-dial race below.
-- **Settling (H1).** An absence is a daemon start, the 1 s monitor not having run for 5 s
+- **Settling.** An absence is a daemon start, the 1 s monitor not having run for 5 s
   (a freeze or suspend), or no authenticated contact with any member for 60 s (contact is a
   sync either way or a ping answered or served). From then on the daemon is *unsettled*.
   It serves Sync and Ping always; it serves a peer's Shell, Exec, Tcp, Copy or
@@ -223,7 +221,7 @@ relays, names `[a-z0-9-]{1,32}`. A roster from a peer is merged item by item
 singly, tombstones go first, and only new items past the limits are skipped, so a full or
 junk-stuffed roster never blocks a revocation. A merge that still fails is refused in
 words (`sync refused: ...`), which `unlink` reports as such. Same-name machines display as
-`name` (earliest added) and `name-<4 hex of id>`. `revoke()` exists for the unlink stage.
+`name` (earliest added) and `name-<4 hex of id>`.
 
 ## Pairing (`src/pair/`)
 
@@ -260,7 +258,7 @@ with no argument); a code given on the command line works but warns that the pro
 shows it. `join` refuses on a machine that already has other members (use `leave` first). If the
 fleet relay list was never set, `link` sets it from the inviter's relays so the joiner
 receives it. A `join` on a machine whose daemon runs without a relay saves the relay to
-config; the running daemon takes the fleet relay list from the roster it receives. No LAN pairing without a relay: stage 1 has no mDNS.
+config; the running daemon takes the fleet relay list from the roster it receives. There is no LAN pairing without a relay (no mDNS).
 
 ## Revocation (`src/trust.rs`, `src/children.rs`, `Daemon::roster_changed`)
 
@@ -271,7 +269,7 @@ process group, SIGKILL after 1 s if still registered (the serving future is kept
 3 s after the revocation, `REVOKED_GRACE`, so that SIGKILL still reaches a command that ignores
 SIGHUP); connections to non-members are
 closed; a `revoked` event is emitted per new tombstone; the change is pushed to members only.
-tmux sessions themselves are kept (they are the owner's; a revoked machine's shell client is
+tmux sessions themselves are kept (they are the user's; a revoked machine's shell client is
 detached). `unlink` applies the tombstone(s) locally first, then syncs with every other
 member in parallel (10 s each) and reports. `leave` pushes a roster with this machine's own
 tombstone first (the receiver spares the sender's connection until its answer is read) and
@@ -361,9 +359,8 @@ The daemon is never started by `check`.
 - `scripts/build-release.sh`: static x86_64 musl binary built in a throwaway `debian:12`
   container with rustup (toolchain pinned, default 1.97.1); caches under
   `target/musl-build/` (about 1.8 GB); output `dist/jaunt-x86_64-linux-musl` and `.sha256`.
-  First build 3 min with `-j 4`; static-pie, 10.7 MB (10 712 904 bytes with settling v2 and the relay fix) with rustc 1.97.1.
-  The whole e2e suite passes with it (the harness installs a binary under its file name, so
-  copy it to a file called `jaunt` first).
+  Static-pie, about 10.7 MB. The harness installs a binary under its file name, so copy it
+  to a file called `jaunt` before running the e2e suite with it.
 - `install.sh` (POSIX sh, no root): downloads the release asset and its `.sha256` from
   GitHub (`JAUNT_REPO`, `--version TAG`, `JAUNT_BASE_URL` for another base, `file://`
   works), falls back to `gh release download` on a 404 (private repository), or takes
@@ -407,8 +404,7 @@ The daemon is never started by `check`.
 - `test/e2e/03-unlink.sh`: harness: c's shell and command on b ended by `a unlink c`, c
   refused by a and b, cannot come back by syncing or by pairing with its old key; with b
   frozen for 60 s, `a unlink c --kill-sessions` ends the session c created on a and prints
-  the reminder; the moment b thaws c sends five commands to b and none gets through
-  (with the build before settling, all five did); b learns of the unlink (time printed).
+  the reminder; the moment b thaws c sends five commands to b and none gets through; b learns of the unlink (time printed).
   Then three rounds of the network-only case: c linked again, b blackholed 90 s with its
   daemon running while a unlinks c, c sends five commands the moment b's network is back,
   none may get through; then `unlink <id prefix of a revoked c> --cascade` works; last,
@@ -417,7 +413,7 @@ The daemon is never started by `check`.
 - `test/e2e/06-paths.sh` also asserts that a daemon restarted while the relay is down is
   reached again on the direct path (address hints), and `05-continuity.sh`'s driver
   reports for each disruption whether the stall line was shown.
-- `test/e2e/04-09`, `run-all.sh` (stage 3): hop, onward hop and re-hop; continuity through
+- `test/e2e/04-09`, `run-all.sh`: hop, onward hop and re-hop; continuity through
   link drops, roams, freezes and a daemon restart; paths (hard NAT modes, relay down and
   back); services (run, cp, fwd, pipe + OpenSSH, throughput); no-contact audit from outside
   (conntrack and iptables counters); keystroke latency (writes `docs/measurements.md`).

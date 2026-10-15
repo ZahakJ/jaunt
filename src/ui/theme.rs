@@ -27,7 +27,7 @@ const fn col(r: u8, g: u8, b: u8, ansi: u8) -> Col {
     Col { rgb: (r, g, b), ansi }
 }
 
-// The palette of DESIGN §11.
+// The palette of design §11.
 pub const VIOLET: Col = col(0xb4, 0xa0, 0xff, 95);
 pub const CYAN: Col = col(0x6f, 0xe3, 0xe1, 96);
 pub const GREEN: Col = col(0x8e, 0xe6, 0xa0, 92);

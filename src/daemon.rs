@@ -35,7 +35,7 @@ const RTT_HISTORY: usize = 60;
 /// written its roster yet: try again this soon, this many times, before the normal cadence.
 const REFUSED_RETRY: Duration = Duration::from_secs(1);
 const REFUSED_FAST_TRIES: u32 = 15;
-/// H1: a settling round syncs with every other member, bounded by this.
+/// A settling round syncs with every other member, bounded by this.
 const SETTLE_LIMIT: Duration = Duration::from_secs(5);
 /// No authenticated contact with any member for this long counts as an absence.
 const ABSENT_AFTER_MS: u64 = 60_000;
@@ -51,13 +51,13 @@ const REVOKED_GRACE: Duration = Duration::from_secs(3);
 struct Peer {
     conn: Option<Connection>,
     /// Every connection adopted for this peer that may still be open (the current one
-    /// included), so that revoking it closes all of them (R2).
+    /// included), so that revoking it closes all of them.
     conns: Vec<Connection>,
     /// Consecutive "not a member" refusals from the peer on connections we dialled.
     refusals: u32,
     /// The connection whose handshake was reported (an outgoing one after its first sync).
     announced: Option<usize>,
-    /// Datagrams received on the current connection, and when that count last grew (H3).
+    /// Datagrams received on the current connection, and when that count last grew.
     rx_seen: (u64, u64),
     conn_seq: u64,
     /// The current connection was dialled by the peer.
@@ -100,15 +100,15 @@ pub struct Daemon {
     pub tried_codes: crate::pair::TriedCodes,
     /// Host-mode guard (§9).
     pub host: crate::awake::Handle,
-    /// H1: the settling round after an absence.
+    /// The settling round after an absence.
     settle: Settle,
-    /// H2: last working direct addresses of each peer, persisted as dial hints.
+    /// Last working direct addresses of each peer, persisted as dial hints.
     addrs: Mutex<crate::addrs::AddrBook>,
-    /// H9: which machine created which tmux session here (persisted).
+    /// Which machine created which tmux session here (persisted).
     tmux_owners: Mutex<BTreeMap<String, MachineId>>,
 }
 
-/// H1. A machine that comes back from an absence (daemon start, a freeze or suspend, or no
+/// A machine that comes back from an absence (daemon start, a freeze or suspend, or no
 /// contact with any member for a minute) may hold a roster that misses a revocation. From
 /// then on it is *unsettled*: it serves a peer's Shell, Exec, Tcp, Copy or KillSessions
 /// only once it has completed a Sync with a member other than that peer, or when no member
@@ -307,12 +307,12 @@ pub async fn run(paths: Paths) -> Result<()> {
         secret,
         relays: &relays,
         relay_ca: cfg.relay_ca.as_deref(),
-        // H4: off unless the owner asks for it (it changes the owner's router).
+        // Off unless asked for: it changes the router's configuration.
         portmapper: cfg.portmap.unwrap_or(false),
         port,
         members: members.clone(),
     };
-    // H2: without a fixed port, bind the one used last time when it is free, so the
+    // Without a fixed port, bind the one used last time when it is free, so the
     // public address peers remember (and the NAT mapping behind it) stays the same.
     let ep = match (cfg.port, addrs.own_port()) {
         (Some(p), _) => net::build_endpoint(opts(Some(p), secret)).await?,
@@ -366,7 +366,7 @@ pub async fn run(paths: Paths) -> Result<()> {
     tokio::spawn(ipc::serve(d.clone(), listener));
     systemd::notify("READY=1");
     {
-        // L3: with or without systemd, a stuck host-mode guard never keeps the lid lock.
+        // With or without systemd, a stuck host-mode guard never keeps the lid lock.
         let d2 = d.clone();
         tokio::spawn(async move {
             loop {
@@ -500,7 +500,7 @@ impl Daemon {
                     // connection outside a dial race (an old one of any age in the same
                     // direction, or an old one older than the race window) means the old
                     // one is dead on its side (it restarted, or its end timed out): close
-                    // ours now rather than leave it open and unaccounted for (R2).
+                    // ours now rather than leave it open and unaccounted for.
                     Some(old) => {
                         old.close(CLOSE_NORMAL.into(), b"replaced by a new connection");
                         Self::set_current(p, &conn, seq, incoming, path.clone());
@@ -525,7 +525,7 @@ impl Daemon {
             });
         }
         // An outgoing connection reports its handshake once its first sync went through
-        // (H8): the other side may still refuse us while it learns of this machine.
+        // The other side may still refuse us while it learns of this machine.
         if incoming && current.stable_id() == conn.stable_id() {
             self.with_peer(&id, |p| p.announced = Some(conn.stable_id()));
             self.events.emit(Some(self.peer_ref(&id)), EventKind::Handshake { incoming, path: kind });
@@ -641,7 +641,7 @@ impl Daemon {
 
     fn refresh_path(&self, conn: &Connection, id: &MachineId, seq: u64) {
         let now = net::selected_path(conn);
-        // H2: a working direct path's address is worth remembering for the next dial.
+        // A working direct path's address is worth remembering for the next dial.
         if let Some(p) = &now
             && p.kind == PathKind::Direct
             && let Ok(sa) = p.remote.parse::<std::net::SocketAddr>()
@@ -709,7 +709,7 @@ impl Daemon {
         match res {
             Ok(Ok(info)) => {
                 self.note_contact();
-                // Shown on this machine's terminal: no control characters, short (R5).
+                // Shown on this machine's terminal: no control characters, short.
                 let info = PingInfo {
                     name: crate::term::safe_text(&info.name, 64, false),
                     version: crate::term::safe_text(&info.version, 32, false),
@@ -816,7 +816,7 @@ impl Daemon {
     // ---------------------------------------------------------------- streams (host side)
 
     async fn serve_conn(self: Arc<Self>, conn: Connection, id: MachineId) {
-        // H1: when this connection was established (it is adopted right after the
+        // When this connection was established (it is adopted right after the
         // handshake), so a settling round that started later ran with the network up.
         let established = now_ms();
         while let Ok((send, recv)) = conn.accept_bi().await {
@@ -865,7 +865,7 @@ impl Daemon {
             return self.refuse_logged(&id, &mut send, "not a member of this mesh").await;
         }
         if !matches!(hello.service, Service::Sync | Service::Ping) {
-            // H1: after an absence, nothing but Sync and Ping until this machine has
+            // After an absence, nothing but Sync and Ping until this machine has
             // synced with a member other than `id`, or a round that started after `id`'s
             // connection was established reached none; then ask again whether `id` is one.
             if !self.wait_settled(id, established).await {
@@ -877,7 +877,7 @@ impl Daemon {
         }
         let served = self.clone().serve_service(conn, id, hello.service, send, recv);
         tokio::pin!(served);
-        // R3: whatever a peer runs here ends when it is revoked, streams included.
+        // Whatever a peer runs here ends when it is revoked, streams included.
         tokio::select! {
             r = &mut served => r,
             _ = self.until_revoked(id) => {
@@ -975,7 +975,7 @@ impl Daemon {
         let changed = match self.apply_remote_roster(&theirs, &id) {
             Ok(c) => c,
             Err(e) => {
-                // Said in words, so `unlink` reports a rejected merge as such (R1).
+                // Said in words, so `unlink` reports a rejected merge as such.
                 let why = format!("{} could not take your roster: {e:#}", self.my_name());
                 return self.refuse_logged(&id, &mut send, &why).await;
             }
@@ -1077,7 +1077,7 @@ impl Daemon {
 
     fn apply_remote_roster(&self, theirs: &Roster, from: &MachineId) -> Result<bool> {
         let mut theirs = theirs.clone();
-        // Item by item: a bad entry or a full roster never costs the tombstones (R1).
+        // Item by item: a bad entry or a full roster never costs the tombstones.
         for what in theirs.sanitize_remote().into_iter().chain(theirs.drop_malformed()) {
             tracing::warn!("ignored {what} in the roster from {}", from.short());
         }
@@ -1095,7 +1095,7 @@ impl Daemon {
                 merged.validate().context("merging would exceed the roster limits")?;
                 merged.save(&self.paths)?;
                 *r = merged;
-                // Membership changes under the roster lock, so no stream slips in between (R4).
+                // Membership changes under the roster lock, so no stream slips in between.
                 self.members.set(member_set(&r, &self.me));
                 (true, before)
             }
@@ -1151,7 +1151,7 @@ impl Daemon {
         if let Ok(g) = self.peers.lock() {
             for (id, p) in g.iter() {
                 if !members.contains(id) && Some(*id) != spare {
-                    // Every connection, not only the current one (R2).
+                    // Every connection, not only the current one.
                     for c in p.conn.iter().chain(p.conns.iter()) {
                         c.close(CLOSE_NOT_MEMBER.into(), b"removed from the mesh");
                     }
@@ -1223,7 +1223,7 @@ impl Daemon {
         });
     }
 
-    /// H3: milliseconds since anything arrived from `id` on its live connection.
+    /// Milliseconds since anything arrived from `id` on its live connection.
     pub fn quiet_ms(&self, id: &MachineId) -> Option<u64> {
         let conn = self.live_conn(id)?;
         let rx = conn.stats().udp_rx.datagrams;
@@ -1236,7 +1236,7 @@ impl Daemon {
         })
     }
 
-    // ---------------------------------------------------------------- settling (H1)
+    // ---------------------------------------------------------------- settling
 
     fn note_contact(&self) {
         self.settle.last_contact.store(now_ms(), Ordering::Relaxed);
@@ -1390,7 +1390,7 @@ impl Daemon {
         }
     }
 
-    // ---------------------------------------------------------------- address hints (H2)
+    // ---------------------------------------------------------------- address hints
 
     fn save_addrs(&self) {
         let members = self.members.snapshot();
@@ -1411,7 +1411,7 @@ impl Daemon {
         }
     }
 
-    // ---------------------------------------------------------------- tmux sessions (H9)
+    // ---------------------------------------------------------------- tmux sessions
 
     /// Remember `from` as the creator of `session` if it does not exist yet.
     async fn note_tmux_creator(&self, session: &str, from: MachineId) {
@@ -1611,7 +1611,7 @@ impl Daemon {
     }
 
     pub fn add_peer(&self, id: MachineId, name: &str) -> Result<String> {
-        // H5: outside test mode the pairing ritual is the only way into the mesh.
+        // Outside test mode the pairing ritual is the only way into the mesh.
         if self.paths.jaunt_home.is_none() {
             bail!("adding a machine without the pairing ritual works only in test mode (JAUNT_HOME set); use jaunt link / jaunt join");
         }
@@ -1652,7 +1652,7 @@ impl Daemon {
     }
 }
 
-/// L15: a detached daemon writes its log to `daemon.log` through stdout/stderr. Past 1 MiB
+/// A detached daemon writes its log to `daemon.log` through stdout/stderr. Past 1 MiB
 /// it becomes `daemon.log.1` (replacing the older one) and a new file takes its place, as
 /// `events.jsonl` does. Only when stderr really is that file (not under systemd).
 fn rotate_own_log(log: &std::path::Path) {
@@ -1704,7 +1704,7 @@ pub async fn open_service(conn: &Connection, service: Service) -> Result<(SendSt
     let reply: Reply = proto::parse_json(&proto::expect_frame(&mut recv, FrameType::Reply).await?, MAX_HEADER)?;
     match reply {
         Reply::Ok => Ok((send, recv)),
-        // Peer text; it can end up on this machine's terminal (unlink's report, R5).
+        // Peer text; it can end up on this machine's terminal (unlink's report).
         Reply::Refused { reason } => bail!("refused: {}", crate::term::safe_text(&reason, 300, false)),
     }
 }
@@ -1724,7 +1724,7 @@ mod tests {
         s.settle_if_done(&mut st, others, now);
     }
 
-    /// H1: what counts as an absence, and what ends one (this machine is b; a and c are
+    /// What counts as an absence, and what ends one (this machine is b; a and c are
     /// the other members; c is the one asking).
     #[test]
     fn unsettled_until_synced_with_a_member_other_than_the_requester() {

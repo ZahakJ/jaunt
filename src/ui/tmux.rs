@@ -33,7 +33,7 @@ pub fn setup(paths: &Paths) -> Result<i32> {
     let g = theme::glyphs();
     println!("{} wrote {shown}", theme::paint(&g.check.to_string(), Style::fg(theme::GREEN).bold()));
     println!();
-    println!("Add this line to your tmux.conf (rihla users: ~/.config/rihla/tmux/local.conf):");
+    println!("Add this line to your tmux.conf:");
     println!();
     println!("    {}", theme::paint(&format!("source-file {shown}"), Style::fg(theme::WHITE).bold()));
     println!();

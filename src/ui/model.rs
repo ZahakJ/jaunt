@@ -652,7 +652,7 @@ mod tests {
         assert!(m.log[0].detail.iter().any(|(t, _)| t.contains("after 2 retries")));
         assert!(!m.log.iter().any(|l| l.tone == Tone::Bad));
 
-        // H8: what the daemon sends now: one quiet refusal, then the link once it synced.
+        // What the daemon sends now: one quiet refusal, then the link once it synced.
         let mut m = Mesh::default();
         m.apply_status(&snap());
         let refused_once = EventKind::DialFailed { error: "xylene refuses this machine as not a member there (it may not know of it yet)".into() };

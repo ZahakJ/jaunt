@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Linking with the ritual (DESIGN §6) in the Docker NAT harness. a starts the mesh, b
+# Linking with the ritual (design §6) in the Docker NAT harness. a starts the mesh, b
 # joins with a code (typed with spaces and capitals), a wrong code fails and burns the
 # code, c joins through b and a learns of c without being touched; all three see each
 # other. Every link is scripted with --yes (the sigil check is compared from the outputs).

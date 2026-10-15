@@ -66,7 +66,7 @@ pub async fn serve(d: Arc<Daemon>, listener: UnixListener) {
         let stream = match listener.accept().await {
             Ok((s, _)) => s,
             Err(e) => {
-                // Out of file descriptors and the like: do not spin a core on it (L15).
+                // Out of file descriptors and the like: do not spin a core on it.
                 tracing::warn!("ipc accept failed: {e}");
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
@@ -194,7 +194,7 @@ fn recorded_socket(paths: &Paths) -> Option<PathBuf> {
     p.is_absolute().then_some(p)
 }
 
-/// Connect to a socket and make sure this user's own daemon is on the other end (L7):
+/// Connect to a socket and make sure this user's own daemon is on the other end:
 /// the directory holding it is a real directory of this user, and the process that
 /// accepted runs as this user.
 async fn connect_checked(sock: &std::path::Path) -> Result<UnixStream> {
@@ -210,7 +210,7 @@ async fn connect_checked(sock: &std::path::Path) -> Result<UnixStream> {
     }
 }
 
-/// This home's daemon: at our socket, or where the lock file says it listens (L6).
+/// This home's daemon: at our socket, or where the lock file says it listens.
 async fn connect_any(paths: &Paths) -> Result<UnixStream> {
     let sock = paths.socket();
     let first = connect_checked(&sock).await;
@@ -263,7 +263,7 @@ fn start_daemon(paths: &Paths) -> Result<()> {
         .context("cannot open the daemon log")?;
     let exe = std::env::current_exe().context("cannot find the jaunt binary")?;
     let mut cmd = std::process::Command::new(exe);
-    // L2/L15: the daemon outlives this command and serves every peer, so it gets neither
+    // The daemon outlives this command and serves every peer, so it gets neither
     // this command's directory nor its whole environment (tokens, agent sockets): a fixed
     // directory, an allowlisted environment and a PATH of absolute directories only.
     cmd.arg("daemon")
@@ -362,7 +362,7 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
 
-    /// L2: an empty or relative PATH entry never reaches the daemon.
+    /// An empty or relative PATH entry never reaches the daemon.
     #[test]
     fn daemon_path_has_only_absolute_entries() {
         assert_eq!(clean_path(Some("/nonexistent::/usr/bin:.:bin:/usr/bin".as_ref())), OsString::from("/nonexistent:/usr/bin"));
@@ -370,7 +370,7 @@ mod tests {
         assert_eq!(clean_path(None), OsString::from("/usr/local/bin:/usr/bin:/bin"));
     }
 
-    /// L15: tokens and agent sockets of the command that started the daemon stay behind.
+    /// Tokens and agent sockets of the command that started the daemon stay behind.
     #[test]
     fn daemon_env_is_an_allowlist() {
         let vars = [

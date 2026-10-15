@@ -181,7 +181,7 @@ verify() { # verify FILE SUMFILE
 }
 
 # The release binary and its .sha256 into $TMP. Plain HTTPS first; a 404 means a private
-# repository (or a missing tag), which 'gh' can reach with the owner's login.
+# repository (or a missing tag), which 'gh' can reach with the user's login.
 fetch() {
 	if [ -n "${JAUNT_BASE_URL:-}" ]; then
 		base=${JAUNT_BASE_URL%/}

@@ -1,10 +1,10 @@
 # Pairing
 
-Pairing (jaunt calls it linking) is how a machine joins your mesh. You do it once per machine, with both machines in front of you: one shows a short code, you type the code on the other, both screens show the same small picture and three words, you confirm on both, and the new machine is a member. Every other machine in the mesh learns about it by itself.
+Linking adds a machine to the mesh, once per machine, with both in front of you: one shows a short code, you type the code on the other, both screens show the same small picture and three words, you confirm on both, and the new machine is a member. Every other machine in the mesh learns about it by itself.
 
 ## The relay comes first
 
-Linking always goes through the relay: the two machines find each other there. So before the first link you need one relay for the whole mesh. Its chapter, [The relay](relay.md), explains the options; the cheapest one costs nothing. If you only want to try jaunt, [Try it on one machine](try-it.md) runs a local test relay.
+Linking goes through the relay, so the mesh needs one first: see [The relay](relay.md). To try jaunt on one computer, [Try it on one machine](try-it.md) runs a local test relay.
 
 ## The first machine
 
@@ -16,7 +16,7 @@ jaunt up
 jaunt link
 ```
 
-- `jaunt relay set URL` stores the relay for the whole mesh. Every machine that links later receives it with the member list, so you set it once. `jaunt relay` with no argument shows the current one. A second URL (`jaunt relay set URL1 URL2`) lists two relays; that setup was not tested. `--ca FILE` trusts a relay certificate signed by your own certificate authority.
+- `jaunt relay set URL` stores the relay for the whole mesh. Every machine that links later receives it with the member list, so you set it once. `jaunt relay` with no argument shows the current one. A second URL (`jaunt relay set URL1 URL2`) lists two relays. `--ca FILE` trusts a relay certificate signed by your own certificate authority.
 - `jaunt up` installs and starts the background service.
 - `jaunt link` opens the pairing screen and shows a code like `4127-tremor-kudos`. Leave it running.
 
@@ -41,15 +41,15 @@ When the code is right, both screens show the same small symmetric picture (the 
 
 Look at both screens. If the picture and all three words are the same, press `y` on both. The screens then tick through the last steps, and the inviting side tells the rest of the mesh about the new machine.
 
-**If they differ, press `n`.** Nothing is changed on either machine: the roster is sent only after both people said yes. Different pictures mean the two machines did not arrive at the same secret, which a correct code on an undisturbed link does not produce. Run `jaunt link` again for a fresh code and try once more. If it happens again, do not link over that relay until you know why.
+**If they differ, press `n`.** Nothing is changed on either machine. Different pictures mean the two machines do not share a key. Run `jaunt link` again for a fresh code; if it happens again, do not link over that relay.
 
-The sigil and words are a second line of defence, not the first. The design says so plainly: without an extra commitment step, an attacker who already had the code could try many key exchanges to find one with a matching sigil; the three words are the harder part to match. Compare the words, not only the picture.
+Compare the words, not only the picture: they are the harder part to forge.
 
 To stop linking at any point, press Ctrl-c, or `n` at the question.
 
-## How the ritual works, briefly
+## How it works
 
-This is the construction magic-wormhole uses, built from standard parts; jaunt adds no new cryptography.
+The construction is magic-wormhole's, from standard parts.
 
 1. **The code** is a nameplate (4 random digits) and two words from the EFF large wordlist, drawn from the operating system's random source. The digits are not secret; the words carry about 25.8 bits of secret.
 2. **Meeting.** The inviting machine opens a temporary endpoint whose key is derived from the nameplate alone. The joining machine derives the same address and dials it through the relay. Anyone who guesses the nameplate can reach that endpoint, and all it gets them is one guess at the next step.
@@ -57,9 +57,9 @@ This is the construction magic-wormhole uses, built from standard parts; jaunt a
 4. **Sealed exchange.** From the shared key, each side derives an encryption key, then sends its real id and name with a signature proving it holds the key it claims.
 5. **Human check.** The sigil and words are computed from the shared key, so both screens agree only when both sides hold the same key.
 6. **Only after both confirmations** does the inviting machine send the roster and the relay list, and the new machine writes them.
-7. A joining machine tries each code once. Whatever went wrong, it does not retry the same code, because a retry would give someone in the middle a second guess.
+7. A joining machine tries each code once, whatever went wrong.
 
-The full description is §6 of `docs/DESIGN.md` in the repository, and the [Security model](security.md) lists what pairing defends against.
+The full description is §6 of `docs/design.md` in the repository, and the [Security model](security.md) lists what pairing defends against.
 
 ## When linking fails
 
@@ -77,7 +77,7 @@ More in [Troubleshooting](troubleshooting.md).
 
 Each further machine joins the same way, from **any** machine already in the mesh, not only the first. Run `jaunt link` there and `jaunt join` on the new one. The new machine appears on every other member without you touching them.
 
-Trust is flat: every member can link new machines and revoke others. There is no master machine to lose, and the cost is that one stolen, unlocked machine can do the same until you revoke it.
+Trust is flat: every member can link new machines and revoke others.
 
 ## Names
 

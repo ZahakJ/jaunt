@@ -11,7 +11,5 @@
 - [Security model](security.md)
 - [Internals](internals.md)
 - [Troubleshooting](troubleshooting.md)
-- [What was tested](testing.md)
-  - [Measurements](measurements.md)
-- [Decisions](decisions.md)
+- [Testing](testing.md)
 - [Changelog](changelog.md)

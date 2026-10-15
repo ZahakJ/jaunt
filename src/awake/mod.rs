@@ -1,4 +1,4 @@
-//! Host mode (DESIGN §9): keep a laptop awake and reachable with the lid closed, only while
+//! Host mode (design §9): keep a laptop awake and reachable with the lid closed, only while
 //! it is on mains power and not too hot; fail towards sleeping in every other case.
 //!
 //! `sysfs`/`power`/`thermal`/`lid` read the machine, `machine` is the pure state machine,

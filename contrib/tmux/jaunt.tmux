@@ -1,5 +1,5 @@
 # jaunt for tmux. `jaunt tmux-setup` copies this file to ~/.config/jaunt/jaunt.tmux;
-# add one line to your tmux.conf (rihla users: ~/.config/rihla/tmux/local.conf):
+# add one line to your tmux.conf:
 #
 #   source-file ~/.config/jaunt/jaunt.tmux
 #

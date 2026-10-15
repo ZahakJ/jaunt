@@ -20,7 +20,7 @@ jh freeze <machine> <seconds> [pause-only]
 jh install <binary> [nodes...] copy a host binary to /opt/jaunt/bin/ (on PATH) in nodes
                                (default: a b c relay); warns if its libraries do not resolve.
 jh hardmode <cone|symmetric|udpblock|both>   reconfigure router c at runtime
-jh tunnel <machine>            baseline "cloudflared-like" path: machine keeps ssh -R to relay,
+jh tunnel <machine>            SSH baseline (reverse tunnel): machine keeps ssh -R to relay,
                                exposing its sshd on relay 127.0.0.1:220N (a=1 b=2 c=3)
 jh sshvia <from> <to> [cmd]    ssh from->relay->to (ProxyJump through relay; needs "jh tunnel <to>")
 jh punch <m1> <m2> [port]      UDP simultaneous-open hole punch test via the introducer

@@ -260,7 +260,7 @@ pub fn draw(st: &State, w: u16, now: u64) -> Canvas {
                 }
             }
             // The code is typed when `jaunt join` asks for it, never put on the command line,
-            // where every local user of the new machine could read it while it runs (PAIR-2).
+            // where every local user of the new machine could read it while it runs.
             c.text(3, y, "on the new machine run, then type the code", Style::fg(theme::DIM));
             y += 1;
             let head = "jaunt join".to_string();
@@ -580,7 +580,7 @@ fn now_ms() -> u64 {
 }
 
 /// The last line off a terminal (or in a pane too narrow to draw in). The message can
-/// quote the other machine (PAIR-1), so it is never printed raw.
+/// quote the other machine, so it is never printed raw.
 fn plain_finish(ok: bool, msg: &str) -> String {
     let msg = crate::term::safe_text(msg, 2000, true);
     if ok { msg } else { format!("jaunt: {msg}") }
@@ -704,7 +704,7 @@ impl Drop for Ritual {
 mod tests {
     use super::*;
 
-    /// PAIR-1 / L9: the plain (non-tty, narrow pane) last line never carries a raw escape,
+    /// The plain (non-tty, narrow pane) last line never carries a raw escape,
     /// even when the daemon's error quotes the other machine's abort reason.
     #[test]
     fn plain_finish_line_has_no_escapes() {
@@ -715,7 +715,7 @@ mod tests {
         assert_eq!(plain_finish(true, "linked toluene"), "linked toluene");
     }
 
-    /// PAIR-2: the inviter's screen must not tell the owner to put the code in argv on the
+    /// The inviter's screen must not tell the user to put the code in argv on the
     /// new machine (the process list shows it to every local user there).
     #[test]
     fn the_join_hint_keeps_the_code_off_the_command_line() {

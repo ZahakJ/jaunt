@@ -589,7 +589,7 @@ mod tests {
         assert!(r.j.err().unwrap().to_string().contains("unlinked"));
     }
 
-    /// PAIR-8: the inviter linked but the joiner never heard the last word. The joiner joins
+    /// The inviter linked but the joiner never heard the last word. The joiner joins
     /// again with a new code and the inviter accepts the existing member (it proves its key).
     #[tokio::test]
     async fn an_existing_member_may_link_again() {
@@ -666,7 +666,7 @@ mod tests {
         assert!(slot.take(Instant::now()).is_err(), "the code is burnt after mallory's one guess");
     }
 
-    /// The mallory of the reviews (PAIR-3, PAIR-4, PAIR-7): she has the right code (read from
+    /// The attacker: she has the right code (read from
     /// a process list), plays the joiner, and tries (a) to register an id that is not a key,
     /// (b) to register someone else's key, (c) to read the roster before any human said yes.
     #[tokio::test]
@@ -725,7 +725,7 @@ mod tests {
         assert!(saved.lock().unwrap().is_empty());
     }
 
-    /// PAIR-3: the check words depend on the session key alone, so an inviter id chosen
+    /// The check words depend on the session key alone, so an inviter id chosen
     /// after the key is known cannot change them, and a forged inviter id fails its proof.
     #[tokio::test]
     async fn a_forged_inviter_id_is_refused_by_the_joiner() {
@@ -750,7 +750,7 @@ mod tests {
         assert!(e.contains("nothing was changed"), "{e}");
     }
 
-    /// PAIR-1: an abort reason is unauthenticated text; it reaches the error (and so the
+    /// An abort reason is unauthenticated text; it reaches the error (and so the
     /// terminal and the event log) without any control character and cut short.
     #[tokio::test]
     async fn abort_reasons_are_cleaned_and_cut() {

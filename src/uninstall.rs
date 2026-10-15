@@ -20,7 +20,7 @@ fn bin_dir(paths: &Paths) -> Option<PathBuf> {
 }
 
 /// What jaunt itself writes in each of its directories. Uninstall deletes these names and
-/// nothing else, then removes the directory only if that left it empty (L1): a directory
+/// nothing else, then removes the directory only if that left it empty: a directory
 /// that is not jaunt's alone (a `JAUNT_HOME` pointed at `$HOME`, say) keeps everything else.
 pub const CONFIG_FILES: &[&str] = &["config.toml", "jaunt.tmux"];
 pub const STATE_FILES: &[&str] = &[
@@ -162,7 +162,7 @@ pub async fn run(paths: &Paths, delete_identity: Option<bool>) -> Result<i32> {
         println!("kept the key and roster in {} (delete that directory to finish)", paths.data_dir.display());
     }
     println!("tmux sessions on this machine are left running; end them with tmux if you want");
-    // L10: what the owner installed as root stays until undone as root.
+    // What the user installed as root stays until undone as root.
     for (file, script) in [
         ("/etc/polkit-1/rules.d/49-jaunt-host.rules", "host-polkit-rule.sh"),
         ("/etc/systemd/logind.conf.d/50-jaunt-lid-on-ac.conf", "logind-lid-on-ac.sh"),
@@ -195,7 +195,7 @@ pub fn check_flags(yes: bool, keep_key: bool) -> Result<Option<bool>> {
 mod tests {
     use super::*;
 
-    /// L1: a JAUNT_HOME that is not jaunt's alone keeps everything that is not jaunt's.
+    /// A JAUNT_HOME that is not jaunt's alone keeps everything that is not jaunt's.
     #[test]
     fn only_jaunts_own_files_go() {
         let home = std::env::temp_dir().join(format!("jaunt-uninst-{}", std::process::id()));

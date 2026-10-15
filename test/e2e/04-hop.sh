@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Hopping (DESIGN §8) in the Docker NAT harness: a scripted PTY hop a -> b, a typed command
+# Hopping (design §8) in the Docker NAT harness: a scripted PTY hop a -> b, a typed command
 # and its output, an onward hop b -> c from inside that session (JAUNT_FROM/JAUNT_MACHINE),
 # Enter ~~ . for the inner hop and Enter ~ . for the outer one, then a second hop to the
 # same session that must show the first one's output (tmux kept it).

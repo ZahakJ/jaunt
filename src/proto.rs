@@ -11,7 +11,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::roster::MachineId;
 
 pub const ALPN: &[u8] = b"jaunt/1";
-/// Spoken only on the temporary pairing endpoints (DESIGN §6).
+/// Spoken only on the temporary pairing endpoints (design §6).
 pub const PAIR_ALPN: &[u8] = b"jaunt-pair/1";
 pub const PROTO_VERSION: u32 = 1;
 pub const MAX_FRAME: usize = 1 << 20;
@@ -98,7 +98,7 @@ pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> Result<Option<Frame>
     }
     let kind = FrameType::from_u8(head[4]).ok_or(FrameError::UnknownType(head[4]))?;
     // Grow as bytes arrive instead of reserving the announced length up front, so a header
-    // that promises 1 MiB costs memory only once the bytes are really there (N1).
+    // that promises 1 MiB costs memory only once the bytes are really there.
     let mut payload = Vec::with_capacity(len.min(64 * 1024));
     (&mut *r).take(len as u64).read_to_end(&mut payload).await?;
     if payload.len() < len {
@@ -229,7 +229,7 @@ pub enum Service {
         op: CopyOp,
         path: String,
     },
-    /// After `jaunt unlink --kill-sessions` (H9): end the tmux sessions that these machines
+    /// After `jaunt unlink --kill-sessions`: end the tmux sessions that these machines
     /// created on the host, for those of them the host has revoked. Reply is followed by
     /// one `Json` frame with the number of sessions ended.
     KillSessions {

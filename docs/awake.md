@@ -31,12 +31,10 @@ The guard checks every 5 seconds:
 | released while the lid is closed (and no dock or second display) | logind normally suspends at once; if the machine is still awake 5 s later, jaunt runs `systemctl suspend` itself, and again a minute later if needed |
 | the daemon crashes, is killed, or hangs | the lock is gone (see below), so logind suspends a closed laptop |
 
-The durations are counted the way a leaky bucket fills: time in the condition adds up,
-time out of it pays back at half speed. A temperature that dips below 90 °C for one
-sample every two minutes therefore still trips, and a loose cable that flaps between
-battery and mains releases the lock instead of keeping it while mostly on battery.
+Durations are leaky buckets: time in the condition adds up, time out of it pays back at
+half speed.
 
-How the lock dies with the daemon: the lock is held by a `systemd-inhibit` child that
+The lock is held by a `systemd-inhibit` child that
 waits on a pipe from the daemon. If the daemon exits in any way, the pipe closes and the
 child exits within milliseconds, so logind drops the lock.
 
@@ -45,9 +43,7 @@ reading that does not come back counts as unknown, which releases the lock. If t
 thread itself stops ticking for 25 s, the daemon kills the lock holder by its process id
 (with or without systemd), `jaunt host status` says the guard is not answering instead of
 showing the last state, and under systemd the daemon also stops sending the watchdog
-keep-alive (`WatchdogSec=30`), so systemd restarts it. One case is outside jaunt's reach:
-a process stuck in an uninterruptible kernel wait cannot be killed by anyone, but killing
-the holder does not need the stuck thread.
+keep-alive (`WatchdogSec=30`), so systemd restarts it.
 
 Mains power is detected the way systemd does it. Batteries in mice and keyboards are
 ignored, and USB-C ports that are giving power away do not count as mains. Temperatures
@@ -62,21 +58,16 @@ hot_secs = 120      # how long it must last (10-600)
 crit_margin_c = 5   # trip at once this close to a sensor's critical point (0-30)
 ```
 
-## What it costs
+## Power
 
-- **Battery**: none. The lock is never held on battery.
-- **Power on mains**: a laptop awake with the lid closed draws roughly 3-8 W while idle
-  (an estimate, not measured). Turn the internal display off on lid close in your
-  compositor, for example Hyprland's `bindl = , switch:on:Lid Switch, exec, hyprctl
-  keyword monitor "eDP-1, disable"`. jaunt does not manage displays.
-- **Heat**: a closed lid can make a laptop a few degrees hotter under load (reports,
-  not measured here). Do not leave a hosting laptop in a bag or on a bed. The heat limit
-  is a backstop, not a cooling plan.
+The lock is never held on battery. jaunt does not manage displays: turn the internal
+display off on lid close in your compositor, e.g. Hyprland's `bindl = , switch:on:Lid
+Switch, exec, hyprctl keyword monitor "eDP-1, disable"`.
 
 ## What it needs
 
 - systemd-logind, and **a local login since boot**. logind gives the lid lock to the
-  owner's background service only while that user has a local graphical session. After
+  user's background service only while that user has a local graphical session. After
   a reboot with nobody logged in, the lock is refused. `jaunt host status` and
   `jaunt check` say so, and the guard tries again every minute. You can close this gap
   once, as root, with `scripts/root-extras/host-polkit-rule.sh`.
@@ -91,69 +82,15 @@ Each script prints exactly what it will change and how to undo it, and asks you 
 | Script | Changes | Undo |
 | --- | --- | --- |
 | `host-polkit-rule.sh install <user>` | writes `/etc/polkit-1/rules.d/49-jaunt-host.rules`: lets that user take the lid and sleep locks without a local login | `host-polkit-rule.sh undo` |
-| `logind-lid-on-ac.sh install` | writes a logind drop-in, `HandleLidSwitchExternalPower=ignore`, and reloads logind. **No heat protection**; the polkit rule is better | `logind-lid-on-ac.sh undo` |
+| `logind-lid-on-ac.sh install` | writes a logind drop-in, `HandleLidSwitchExternalPower=ignore`, and reloads logind. No heat protection | `logind-lid-on-ac.sh undo` |
 | `wake-on-lan.sh install <connection>` | sets NetworkManager wake-on-LAN/WLAN to `magic` for that connection | `wake-on-lan.sh undo <connection>` |
 
 Waking a sleeping laptop is not part of jaunt. A magic packet works only from another
 machine on the same LAN, and WoL must also be enabled in the firmware setup.
 
-## What has been verified
-
-On the always-on desktop where this was built (no lid, no battery, no thermal zones;
-logind counts it as docked because of two displays):
-
-- **Unit tests** run over fake sysfs/procfs trees and a fake logind for every transition:
-  - holding on mains
-  - a cable wiggle
-  - mains lost with the lid closed: release, then suspend after the grace, then a retry
-  - mains lost with the lid open: release only
-  - never taking the lock on battery
-  - 120 s hot: release, suspend, and stay released after cooling until the lid opens
-  - a short spike that does not trip
-  - near-critical: trips at once
-  - unreadable power and missing sensors: no hold, and suspend if the lid is closed
-  - logind disagreeing about power
-  - the lock refused: retry after a minute, with the reason shown
-  - the holder dying: taken again
-  - docked: no suspend
-  - weak charger
-  - unknown lid: never suspend
-  - power-supply cases: the Logitech mouse battery, a USB-C supply with `online=2` as sink and as source, an absent battery, no supplies at all
-  - thermal cases: junk NVMe limits, a hot GPU that does not count as CPU heat
-- **The real lock on this desktop**, through the daemon in a `JAUNT_HOME` sandbox:
-  - `jaunt host on` took it; `systemd-inhibit --list` showed `jaunt … sleep:handle-lid-switch … block`.
-  - `kill -9` of the daemon removed it within 1 s, and no holder process was left.
-  - `jaunt host off` and SIGTERM both released it.
-
-**Not verified** (no laptop was available):
-
-- that logind really suspends a closed laptop when the lock is released
-- that `systemctl suspend` from the guard works
-- real heat behaviour with the lid closed
-- the systemd watchdog actually killing a hung daemon
-- the no-local-login refusal
-- every root-extra script (they pass shellcheck and have never been run)
-
-## First test on a real laptop
-
-Do this with the laptop on a desk, in sight.
-
-1. `jaunt up`, then log in locally. Run `jaunt host on` and `jaunt host status`: it should say
-   `awake`, and `systemd-inhibit --list` should show `jaunt`.
-2. Close the lid on mains. From another machine, run `jaunt ls` (expect `awake`), then `jaunt <laptop>`.
-3. Pull the charger with the lid closed. It should be asleep within about 15 s.
-4. Plug in and open the lid. Then close it and run `stress-ng --cpu 0 --timeout 300s`
-   from another machine. It should release and sleep within 2 to 3 minutes of reaching
-   90 °C. Open the lid, and `host status` should show `awake` again.
-5. With the lid closed on mains, `kill -9` the daemon. It should sleep at once.
-6. Reboot and do not log in. `jaunt host status` from another machine should say the lock
-   is refused. Then decide whether you want the polkit rule.
-7. Optionally, log `jaunt host status` every minute for an hour with the lid closed, to
-   see the real temperature curve.
-
 ## macOS
 
-Unverified, never built. A Mac cannot keep a closed lid awake without root
+A Mac cannot keep a closed lid awake without root
 (`pmset disablesleep`) or Apple's clamshell conditions (power, an external display and
 a keyboard or mouse). On macOS `jaunt host on` only holds `caffeinate -s` (prevents
 system sleep on AC, tied to the daemon's pid) while the lid is open, and says so:

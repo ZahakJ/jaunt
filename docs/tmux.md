@@ -2,12 +2,11 @@
 
 ## The tmux snippet
 
-
 ```sh
 jaunt tmux-setup
 ```
 
-then add this one line to your `~/.tmux.conf` (rihla users: `~/.config/rihla/tmux/local.conf`) and reload tmux:
+then add this one line to your `~/.tmux.conf` and reload tmux:
 
 ```
 source-file ~/.config/jaunt/jaunt.tmux
@@ -20,11 +19,10 @@ source-file ~/.config/jaunt/jaunt.tmux
 
 Nothing else is bound; your prefix and `Ctrl-h/j/k/l` are untouched.
 
-## Nested tmux, for a tmux beginner
-
+## Nested tmux
 
 If you hop from inside tmux, there are now two tmux programs on your screen: yours (the outer one) and the one on the other machine (inside the window). Your prefix key (Ctrl-b) always goes to the **outer** one first.
 
-- To talk to the **remote** tmux: press `F12` once (with the snippet), then use Ctrl-b as usual; press `F12` again to come back. Without the snippet: press the prefix twice (Ctrl-b Ctrl-b) then the key, which is standard tmux behaviour (not tested with jaunt).
+- To talk to the **remote** tmux: press `F12` once (with the snippet), then use Ctrl-b as usual; press `F12` again to come back. Without the snippet: press the prefix twice (Ctrl-b Ctrl-b) then the key, as usual in tmux.
 - To detach from the remote tmux: `F12`, then Ctrl-b `d`. You are back in your outer tmux, and the remote session stays.
 - When in doubt, `Enter ~ .` always works: it is read by jaunt itself, not by either tmux.

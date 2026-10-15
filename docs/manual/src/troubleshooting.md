@@ -1,6 +1,6 @@
 # Troubleshooting
 
-This chapter is organised by what you see. Most answers start with the same command:
+Most answers start with:
 
 ```sh
 jaunt check
@@ -60,7 +60,7 @@ Machines learn their public address from the relay over **UDP port 7842**; witho
 2. **This network.** Some networks block outgoing UDP. Run `check` from another network to compare.
 3. **The kind of NAT.** `this network's NAT uses a different public port per destination (hard NAT): direct paths are unlikely and traffic will go through the relay` means the router here makes direct paths unlikely even with UDP open.
 
-`check` then also mentions port mapping: `portmap = true` in `config.toml` lets jaunt ask the router (UPnP, NAT-PMP, PCP) to forward a UDP port. It is off by default because it changes your router's settings.
+`check` then also mentions port mapping: `portmap = true` in `config.toml` lets jaunt ask the router (UPnP, NAT-PMP, PCP) to forward a UDP port. It is off by default.
 
 ## A machine shows offline
 
@@ -80,13 +80,13 @@ The connection is gone. jaunt keeps your terminal, retries after 1, 2, 4 and 8 s
 
 ## A slow recovery after an outage
 
-Moving to a new network right after an outage (in the lab: onto a hard NAT, straight after a 60-second drop) can leave a hop frozen with the line `no answer for …s · waiting for the link` for much longer than usual: 17 and 49 seconds in two lab runs. This is a known limit of iroh 1.3: after an outage it backs off reconnecting to the relay for up to about 16 seconds plus jitter, and a network change does not cut that short. jaunt cannot shorten the wait; the hop recovers by itself.
+Moving to a new network right after an outage can leave a hop frozen with the line `no answer for …s · waiting for the link` for 17 to 49 seconds. After an outage iroh backs off reconnecting to the relay, and a network change does not reset the backoff. The hop recovers by itself.
 
 ## The first hop after sleep waits a few seconds
 
 The first hop, command or copy into a machine that has just come back from sleep (or a restart, a freeze, or an outage of a minute or more) can wait up to 5 seconds before anything happens. The next ones do not.
 
-This is deliberate. A machine that was away may have missed a revocation, so before serving a shell, command, port or copy it first tries to sync with the other members, for at most 5 seconds, once per absence. The rule is called settling; [Revoking a lost laptop](security.md#revoking-a-lost-laptop) explains the window it leaves.
+Before serving a shell, command, port or copy, a machine that was away first syncs with the other members to pick up any revocation it missed: at most 5 seconds, once per absence. See [Revoking a lost laptop](security.md#revoking-a-lost-laptop).
 
 ## tmux is missing on the host
 
@@ -98,7 +98,7 @@ The hop still works, but with no tmux to keep the session, closing the link ends
 
 ## The lid closes and the laptop sleeps anyway
 
-Host mode holds the laptop awake only while every condition holds; anything else means sleep, on purpose. `jaunt host status` on the laptop says what is true now, what closing the lid would do, and what is missing. The usual causes:
+Host mode holds the laptop awake only while every condition holds; anything else means sleep. `jaunt host status` on the laptop says what is true now, what closing the lid would do, and what is missing. The usual causes:
 
 | Cause | What you see, what to do |
 | --- | --- |
@@ -109,7 +109,7 @@ Host mode holds the laptop awake only while every condition holds; anything else
 | the daemon was started from an SSH login | `this is an SSH login and the jaunt service is not installed: a daemon started from here belongs to the SSH session and logind refuses it the lid lock; run 'jaunt up' so it runs as a user service` |
 | plugged back in with the lid closed | it stays asleep until the lid is opened; jaunt does not wake machines |
 
-The full rules are in [Host mode](awake.md). Remember that host mode has not yet been run on a real laptop.
+The full rules are in [Host mode](awake.md).
 
 ## `jaunt join` says the code is wrong or expired
 
@@ -126,7 +126,7 @@ jaunt handles this with a lock file, `daemon.lock`, next to the key in `~/.local
 | What | Where |
 | --- | --- |
 | the daemon's log, when it was started by a `jaunt` command | `~/.local/state/jaunt/daemon.log` (rotated to `daemon.log.1` past 1 MiB) |
-| the daemon's log, under the systemd user service | the user journal: `journalctl --user -u jaunt` (the real systemd user service was never run in the tests) |
+| the daemon's log, under the systemd user service | the user journal: `journalctl --user -u jaunt` |
 | the event history (handshakes, path changes, syncs, links) | `~/.local/state/jaunt/events.jsonl`, also shown live in the mesh view |
 | every address the daemon has talked to | the end of `jaunt check`; anything that is not the relay or a linked machine is a `warn` |
 

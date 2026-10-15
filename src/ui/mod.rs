@@ -102,7 +102,7 @@ pub fn hop_banner_out(me: &str, peer: &str, session_kept: bool) -> String {
 }
 
 /// The single status line while the link is down.
-/// H3: the session is up but nothing has come back for a while (a roam, a dead Wi-Fi).
+/// The session is up but nothing has come back for a while (a roam, a dead Wi-Fi).
 pub fn stalled_line(peer: &str, quiet_s: u64) -> String {
     let g = glyphs();
     let dot = paint(&format!(" {} ", g.dot), Style::fg(theme::FAINT));

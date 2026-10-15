@@ -30,7 +30,7 @@ impl Paths {
     pub fn from_env() -> Result<Paths> {
         if let Some(h) = std::env::var_os("JAUNT_HOME").filter(|v| !v.is_empty()) {
             let home = PathBuf::from(h);
-            // A relative JAUNT_HOME would mean a different home in every directory (L1).
+            // A relative JAUNT_HOME would mean a different home in every directory.
             if !home.is_absolute() {
                 bail!("JAUNT_HOME must be an absolute path (it is {})", home.display());
             }
@@ -78,7 +78,7 @@ impl Paths {
     pub fn socket(&self) -> PathBuf {
         self.runtime_dir.join("sock")
     }
-    /// The single-instance lock lives next to the key (L6): one daemon per identity, even
+    /// The single-instance lock lives next to the key: one daemon per identity, even
     /// when two contexts disagree about XDG_RUNTIME_DIR. It records the daemon's socket.
     pub fn lock_file(&self) -> PathBuf {
         self.data_dir.join("daemon.lock")
@@ -95,7 +95,7 @@ impl Paths {
 }
 
 /// Create `dir` (and parents) and make sure the leaf is a real directory of this user,
-/// mode 0700. A symlink or a directory owned by someone else is refused (L7).
+/// mode 0700. A symlink or a directory owned by someone else is refused.
 pub fn private_dir(dir: &Path) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
     check_owned_dir(dir)?;

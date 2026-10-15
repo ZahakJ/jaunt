@@ -61,7 +61,7 @@ fn tmux_version_at_least_3(v: &str) -> bool {
 }
 
 /// Find a program on PATH. Only absolute PATH entries count: an empty or relative entry
-/// (`::`, `.`) would make the program depend on the current directory (L2).
+/// (`::`, `.`) would make the program depend on the current directory.
 pub fn which(name: &str) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let path = std::env::var_os("PATH")?;
@@ -274,7 +274,7 @@ fn shell_service(session: &str) -> Service {
 }
 
 /// `jaunt <machine>[:session]`. Returns the process exit code.
-/// DESIGN §8: a hop from inside tmux without jaunt.tmux gets a one-time hint about how
+/// Design §8: a hop from inside tmux without jaunt.tmux gets a one-time hint about how
 /// keys reach the remote tmux. Shown once per machine (a marker in the state directory).
 fn tmux_hint_once(paths: &Paths, peer: &str) {
     if std::env::var_os("TMUX").is_none() {
@@ -284,7 +284,7 @@ fn tmux_hint_once(paths: &Paths, peer: &str) {
     if marker.exists() {
         return;
     }
-    // By absolute path (L2): an empty or relative PATH entry must not pick up a `tmux`
+    // By absolute path: an empty or relative PATH entry must not pick up a `tmux`
     // planted in whatever directory this command runs in.
     let snippet = which("tmux")
         .and_then(|tmux| {
@@ -407,7 +407,7 @@ struct Signals {
     hup: tokio::signal::unix::Signal,
 }
 
-/// H3: typed input with no output back for this long, and nothing at all (data, acks,
+/// Typed input with no output back for this long, and nothing at all (data, acks,
 /// keep-alives) from the machine for this long, shows the stall line.
 const STALL_AFTER: Duration = Duration::from_secs(3);
 
@@ -507,7 +507,7 @@ async fn session_loop(
                         stdout.flush().await?;
                     }
                     FrameType::Notice => {
-                        // From the host, printed outside the PTY data: no escapes (R5).
+                        // From the host, printed outside the PTY data: no escapes.
                         let text = term::safe_text(&String::from_utf8_lossy(&f.payload), 500, true).replace('\n', "\r\n");
                         stdout.write_all(format!("\r\njaunt: {text}\r\n").as_bytes()).await?;
                     }

@@ -84,7 +84,7 @@ fn prompt_relay() -> Result<String> {
     Ok(line.trim().to_string())
 }
 
-/// The code, from the terminal or stdin (PAIR-2): never from argv unless given there, which
+/// The code, from the terminal or stdin: never from argv unless given there, which
 /// the process list shows to every local user while the join runs.
 fn read_code() -> Result<String> {
     let mut line = String::new();
@@ -186,7 +186,7 @@ pub async fn unlink(paths: &Paths, target: String, cascade: bool, kill_sessions:
     Ok(0)
 }
 
-/// H9: what revocation does not undo, said plainly (the machine may have been in hostile hands).
+/// What revocation does not undo (the machine may have been in hostile hands).
 fn revocation_reminder(who: &str, killed_sessions: bool) -> String {
     let sessions = if killed_sessions {
         "processes it started outside its own tmux sessions"

@@ -1,4 +1,4 @@
-//! The roster: who is in the mesh. A small replicated set (DESIGN §7).
+//! The roster: who is in the mesh. A small replicated set (design §7).
 //!
 //! - entries `{id, name, added_at, added_by, named_at}`: union; for the same id the entry
 //!   with the greatest `(named_at, name, added_at, added_by)` wins, so renames propagate.
@@ -239,7 +239,7 @@ impl Roster {
     }
 
     /// Merge a roster that came from another machine without ever exceeding the limits,
-    /// and without letting the limits block a revocation (R1): tombstones go first, and a
+    /// and without letting the limits block a revocation: tombstones go first, and a
     /// tombstone for an id this roster knows is always taken; only tombstones for unknown
     /// ids, and new entries, are skipped once the limits are reached. Below the limits it
     /// is exactly `merge`. Returns (changed, how many items were skipped).
@@ -726,7 +726,7 @@ mod tests {
         }
     }
 
-    /// R1: a member pushes junk entries until the rosters are full. A tombstone that arrives
+    /// A member pushes junk entries until the rosters are full. A tombstone that arrives
     /// in the same or a later roster is still taken, and the result stays within the limits.
     #[test]
     fn full_rosters_never_block_a_tombstone() {
@@ -761,7 +761,7 @@ mod tests {
         assert!(naive.validate().is_err());
     }
 
-    /// R1, variation (found in verification): junk whose tombstones name ids that the same
+    /// Variation: junk whose tombstones name ids that the same
     /// junk roster also carries as entries. Those tombstones used to count as "known" even
     /// when the entries themselves were not taken (entries full), so a pusher could fill the
     /// tombstones exactly to the limit; from then on every later tombstone, a remote one or
@@ -871,7 +871,7 @@ mod tests {
 
     #[test]
     fn a_member_may_revoke_others_and_that_spreads() {
-        // Flat trust (DESIGN §7): any member's tombstones are accepted, including one for
+        // Flat trust (design §7): any member's tombstones are accepted, including one for
         // the receiving machine itself.
         let mut a = roster(&[entry(1, "a", 1, 1), entry(2, "b", 2, 1), entry(3, "c", 3, 1)], &[]);
         let from_c = roster(&[], &[(1, 5, 3), (2, 5, 3)]);

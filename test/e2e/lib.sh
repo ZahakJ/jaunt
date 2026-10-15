@@ -89,7 +89,7 @@ h_unlock() {
   rm -f "$LOCK_DIR/owner"; rmdir "$LOCK_DIR" 2>/dev/null || true
 }
 
-# ---- trust (stage 2) ---------------------------------------------------------------
+# ---- trust --------------------------------------------------------------------------
 RELAY_URL=https://relay.jaunt.test
 
 # h_fresh <node> [with-relay]: stop jaunt, wipe its JAUNT_HOME, write a config (name and
@@ -135,7 +135,7 @@ h_members() { h_jaunt "$1" ls | awk -F'\t' '$2!="self" {print $1}' | sort | tr '
 h_knows() { h_jaunt "$1" ls | awk -F'\t' -v p="$2" '$1==p {f=1} END {exit !f}'; }
 h_not_knows() { ! h_knows "$@"; }
 
-# ---- stage 3: shared setup for 04-09 -------------------------------------------------
+# ---- shared setup for 04-09 ---------------------------------------------------------
 H_JH=$HARNESS/jh
 
 # Put the lab's network back the way up.sh leaves it: no delay, c's NAT hard, every

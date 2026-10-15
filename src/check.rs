@@ -2,7 +2,7 @@
 //! and a sentence; the exit status is 1 when anything failed.
 //!
 //! The daemon half (`Contacts`, `report`) records every remote address the daemon has sent
-//! QUIC packets to and lists its open sockets, so the owner can see that it talks to the
+//! QUIC packets to and lists its open sockets, so the user can see that it talks to the
 //! relay and the peers and to nothing else.
 
 use std::collections::HashMap;
@@ -351,7 +351,7 @@ fn check_peers(st: &StatusSnapshot, portmap: bool, o: &mut Out) {
     if direct.is_empty() {
         o.warn("no direct path to any machine: everything goes through the relay");
         if !portmap {
-            // H4: an option, never a default: it asks the router to open a port.
+            // An option, never a default: it asks the router to open a port.
             o.info(portmap_hint());
         }
     } else {

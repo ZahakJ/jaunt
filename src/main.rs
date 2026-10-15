@@ -222,7 +222,7 @@ fn main() {
     ui::theme::set_no_color_flag(cli.no_color);
     let daemon = matches!(cli.cmd, Some(Cmd::Daemon));
     if daemon {
-        // L2: however the daemon was started, it does not stay in (or keep busy) the
+        // However the daemon was started, it does not stay in (or keep busy) the
         // directory it was started from, and its PATH holds absolute directories only, so
         // no helper (tmux, systemd-inhibit, busctl, systemctl) is ever found relative to it.
         let _ = std::env::set_current_dir(ipc::daemon_dir());

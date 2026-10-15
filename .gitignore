@@ -1,7 +1,6 @@
 /target/
 /spike/
 /captures/tmp/
-.session-id
 test/harness/.state/
 /dist/
 .scratch/

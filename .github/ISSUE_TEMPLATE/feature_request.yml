@@ -6,7 +6,7 @@ body:
     id: problem
     attributes:
       label: The problem
-      description: What you are trying to do and where jaunt gets in the way. Check the manual's "Decisions" page first; some things are left out on purpose.
+      description: What you are trying to do and where jaunt gets in the way.
     validations:
       required: true
   - type: textarea

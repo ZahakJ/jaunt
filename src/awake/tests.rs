@@ -362,7 +362,7 @@ fn short_heat_spikes_with_real_cooling_do_not_trip() {
     assert!(!g.state.latched);
 }
 
-/// L4 (D): a CPU sitting at the limit under fan control, dipping below it for one sample
+/// A CPU sitting at the limit under fan control, dipping below it for one sample
 /// every two minutes, used to restart the 120 s window forever and never trip.
 #[test]
 fn heat_that_dips_for_one_sample_still_trips() {
@@ -387,7 +387,7 @@ fn heat_that_dips_for_one_sample_still_trips() {
     assert!(!g.backend.holding);
 }
 
-/// L4 (A): a loose cable, 10 s on battery and 5 s on mains, over and over. It used to keep
+/// A loose cable, 10 s on battery and 5 s on mains, over and over. It used to keep
 /// the lock all the time (two thirds of it on battery).
 #[test]
 fn a_flapping_cable_releases_and_stays_released() {
@@ -420,7 +420,7 @@ fn a_flapping_cable_releases_and_stays_released() {
     assert!(g.backend.holding, "steady mains brings the lock back");
 }
 
-/// L4 (B): a weak charger whose battery alternates draining and charging used to restart
+/// A weak charger whose battery alternates draining and charging used to restart
 /// the 60 s window and never count as battery.
 #[test]
 fn a_weak_charger_that_alternates_still_counts_as_battery() {
@@ -438,7 +438,7 @@ fn a_weak_charger_that_alternates_still_counts_as_battery() {
     assert!(!g.backend.holding, "a charger that cannot keep up is battery power");
 }
 
-/// L3: a sensor read that never returns (a hung driver; a FIFO here) must not freeze the
+/// A sensor read that never returns (a hung driver; a FIFO here) must not freeze the
 /// guard while it holds the lock: the reading counts as unknown and the lock goes.
 #[test]
 fn a_hung_sensor_read_releases_the_lock() {
@@ -465,7 +465,7 @@ unsafe extern "C" {
     fn libc_mkfifo(path: *const std::ffi::c_char, mode: u32) -> i32;
 }
 
-/// L12: the CPU sensors vanish but a cool drive still reads: not "cool", but unknown.
+/// The CPU sensors vanish but a cool drive still reads: not "cool", but unknown.
 #[test]
 fn losing_the_cpu_sensors_is_unknown_heat() {
     let t = Tree::laptop("st6f");

@@ -30,7 +30,7 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tmux_socket: Option<String>,
     /// UPnP / NAT-PMP / PCP port mapping on the local gateway (`portmap = true`). Off by
-    /// default everywhere: it changes the owner's router. (`portmapper` is read as well.)
+    /// default everywhere: it changes the router's configuration. (`portmapper` is read as well.)
     #[serde(skip_serializing_if = "Option::is_none", alias = "portmapper")]
     pub portmap: Option<bool>,
     /// Fixed UDP port for the endpoint (default: any).

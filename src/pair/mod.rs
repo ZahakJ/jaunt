@@ -1,4 +1,4 @@
-//! The pairing ritual (DESIGN §6), daemon side: the inviter's temporary rendezvous
+//! The pairing ritual (design §6), daemon side: the inviter's temporary rendezvous
 //! endpoint, the joiner's dial, and the IPC conversation that reports each step and asks
 //! the local human to compare the sigils.
 
@@ -29,10 +29,10 @@ use flow::{Me, Slot, Steps};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const FIRST_MESSAGE_TIMEOUT: Duration = Duration::from_secs(20);
 const FAN_OUT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Connections the inviter handles at once while waiting for a first message (PAIR-6).
+/// Connections the inviter handles at once while waiting for a first message.
 const MAX_PENDING: usize = 16;
 
-/// PAIR-5: codes this machine already tried as a joiner. A code is tried once: whatever
+/// Codes this machine already tried as a joiner. A code is tried once: whatever
 /// went wrong (a wrong guess by someone in the middle, an abort with a plausible excuse),
 /// trying the same code again would hand that someone another guess. Kept as hashes, for
 /// the life of a code.
@@ -128,7 +128,7 @@ pub async fn serve_ipc(d: Arc<Daemon>, s: UnixStream, req: Request, yes: bool) -
 }
 
 async fn send_step(events: &EventLog, wr: &mut tokio::net::unix::OwnedWriteHalf, role: PairRole, step: PairStep, client_here: &mut bool) {
-    // The event log never carries the code itself, nor the sigil and words (PAIR-9).
+    // The event log never carries the code itself, nor the sigil and words.
     let logged = match &step {
         PairStep::Waiting { code, expires_at_ms, relays, first_machine } => PairStep::Waiting {
             code: code.split('-').next().map(|n| format!("{n}-…")).unwrap_or_default(),
@@ -204,7 +204,7 @@ type Started = (Connection, iroh::endpoint::SendStream, iroh::endpoint::RecvStre
 
 /// One incoming connection up to its first message. Someone who connects but never speaks
 /// does not use up the code, and does not hold up anyone else either: these run side by
-/// side (PAIR-6), and the first well-formed first message takes the code's one attempt.
+/// side, and the first well-formed first message takes the code's one attempt.
 async fn first_message(incoming: iroh::endpoint::Incoming) -> Option<Started> {
     let conn = timeout(CONNECT_TIMEOUT, incoming).await.ok()?.ok()?;
     if conn.alpn() != PAIR_ALPN {
@@ -347,7 +347,7 @@ async fn join_on(d: &Arc<Daemon>, ep: &Endpoint, code: &Code, relays: &[iroh::Re
     };
     let _ = steps.send(PairStep::Rendezvous);
     let (mut send, mut recv) = conn.open_bi().await.map_err(|e| anyhow!("cannot talk to the inviting machine: {e}"))?;
-    // The first message spends the code on this machine too (PAIR-5).
+    // The first message spends the code on this machine too.
     d.tried_codes.try_once(code, Instant::now())?;
     let res = flow::join(&mut recv, &mut send, code, &me(d), steps, answer).await;
     let _ = send.finish();
@@ -360,7 +360,7 @@ async fn join_on(d: &Arc<Daemon>, ep: &Endpoint, code: &Code, relays: &[iroh::Re
 mod tests {
     use super::*;
 
-    /// PAIR-5: a code is tried once from the joining machine, whatever happened the first
+    /// A code is tried once from the joining machine, whatever happened the first
     /// time; after the code's lifetime the record is forgotten.
     #[test]
     fn a_joiner_tries_each_code_once() {

@@ -154,7 +154,7 @@ pub async fn build_endpoint(o: EndpointOptions<'_>) -> Result<Endpoint> {
     Ok(ep)
 }
 
-/// A short-lived endpoint for pairing (DESIGN §6). It speaks only `jaunt-pair/1`, accepts
+/// A short-lived endpoint for pairing (design §6). It speaks only `jaunt-pair/1`, accepts
 /// any remote (the PAKE is the authentication), and never asks the gateway for a mapping.
 /// `accept` = it is the inviter's rendezvous endpoint; the joiner's only dials.
 pub async fn build_pair_endpoint(secret: SecretKey, relays: &[RelayUrl], relay_ca: Option<&Path>, accept: bool) -> Result<Endpoint> {

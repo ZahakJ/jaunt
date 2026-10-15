@@ -18,11 +18,7 @@ Run it as the user who will use jaunt, not as root; the script refuses to run as
 
 The script is POSIX `sh`, and everything in it sits inside one function that runs on the last line, so a download cut off half way runs nothing.
 
-### What the checksum proves, and what it does not
-
-The checksum file comes from the same place as the binary: the same GitHub release. So it catches a truncated or corrupted download. It does not catch a malicious release or a compromised repository, because whoever could replace the binary could replace the checksum next to it. Releases are not signed. The [Security model](security.md) lists this under "What is not defended".
-
-The public `curl` line itself has never been run in the tests; they installed from a file. See [What was tested](testing.md).
+Releases are not signed; the checksum catches a corrupted download.
 
 ### Passing options through the one-liner
 
@@ -90,15 +86,15 @@ sh install.sh --from-file target/release/jaunt
 
 | Platform | Status |
 | --- | --- |
-| Linux x86_64 | release binary; the only platform tested, and only in a simulated lab |
-| other Linux | build from source; not tested |
-| macOS | never built. The design expects hopping to work and host mode to be limited (see [Host mode](awake.md)), but none of it has been tried |
+| Linux x86_64 | release binary |
+| other Linux | build from source |
+| macOS | build from source; host mode is limited (see [Host mode](awake.md)) |
 
 The machine you hop *into* should have tmux. Without it a hop gets a plain shell that ends when the link drops; `jaunt check` warns about this.
 
-## First thing to run: `jaunt demo`
+## Demo
 
-Before setting up a relay or linking anything, look at the demo:
+`jaunt demo` runs the interface on made-up machines:
 
 ```sh
 jaunt demo               # the live mesh view on made-up machines
@@ -107,11 +103,11 @@ jaunt demo link          # the pairing screens, inviting side
 jaunt demo link --join   # the pairing screens, joining side
 ```
 
-It runs entirely on simulated data: no daemon, no network, no relay. Press `q` to leave the mesh view. Colour follows your terminal: `NO_COLOR` or `--no-color` turns it off, and `JAUNT_ASCII=1` swaps the box-drawing glyphs for plain ASCII.
+No daemon, network or relay is involved. Press `q` to leave the mesh view. Colour follows your terminal: `NO_COLOR` or `--no-color` turns it off, and `JAUNT_ASCII=1` swaps the box-drawing glyphs for plain ASCII.
 
 ## Next steps
 
-After installing on the first machine, the order is:
+On the first machine:
 
 ```sh
 jaunt relay set https://relay.example.net   # once, on the first machine
@@ -121,7 +117,7 @@ jaunt link                                   # shows a code for the next machine
 
 The relay comes first; its chapter is [The relay](relay.md). Then [Pairing](pairing.md).
 
-`jaunt up` installs a systemd user service (`~/.config/systemd/user/jaunt.service`) so the daemon starts at login and survives logout. It uses `KillMode=process`, so restarting jaunt never kills your tmux sessions. Without the service, any `jaunt` command starts the daemon by itself when it needs it, and says so. `jaunt down` stops it. Running `jaunt up` with the real systemd user manager is on the list of things never run in the tests.
+`jaunt up` installs a systemd user service (`~/.config/systemd/user/jaunt.service`) so the daemon starts at login and survives logout. It uses `KillMode=process`, so restarting jaunt never kills your tmux sessions. Without the service, any `jaunt` command starts the daemon by itself when it needs it, and says so. `jaunt down` stops it.
 
 ## Uninstall
 

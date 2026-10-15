@@ -1,4 +1,4 @@
-//! The cryptographic parts of pairing, all standard constructions (DESIGN §6):
+//! The cryptographic parts of pairing, all standard constructions (design §6):
 //! SPAKE2 (RustCrypto `spake2`, Ed25519 group, asymmetric roles), HKDF-SHA256 for the
 //! nameplate key and the two directional keys, ChaCha20-Poly1305 for the sealed messages,
 //! SHA-256 for the human check, and each machine's own ed25519 key (the key it already
