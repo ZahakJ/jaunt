@@ -95,6 +95,16 @@
   </article>
 </section>
 
+<section class="how wrap" aria-labelledby="past-title">
+  <h2 id="past-title">Past the terminal</h2>
+  <div class="cols">
+    <p><code>jaunt ports toluene</code> lists what listens there; one key forwards a port and opens it in your browser. <code>jaunt open toluene:7707</code> does it by name.</p>
+    <p>Forwards held by the service come back after sleep, a new network or a restart. <code>rfwd</code> reverses them; <code>socks</code> browses through the other machine's network.</p>
+    <p><code>jaunt tabs toluene</code> pulls its open browser tabs. Links opened in a hop open in the browser you hopped from.</p>
+    <p><code>jaunt clip on</code> shares the clipboard both ways. <code>jaunt notify</code> says when a long job is done. <a href="./manual/tools.html">More</a></p>
+  </div>
+</section>
+
 <section class="how wrap" aria-labelledby="how-title">
   <h2 id="how-title">How it works</h2>
 <pre class="diagram" aria-label="Diagram: your terminal runs jaunt toluene, which talks to the local daemon; the daemon connects to the daemon on the other machine over QUIC with TLS 1.3, directly when possible and otherwise through the relay; the far daemon attaches to a tmux session."><code> your terminal                                               the other machine
@@ -121,7 +131,7 @@
   <p>One static binary in <code>~/.local/bin</code>, no root. Linux x86_64 has a release binary; elsewhere, <code>cargo build --release</code>.</p>
 
   <div class="release">
-    <p class="release-line">Latest release <span data-release-tag>v0.1.2</span>, <time data-release-date datetime="2026-10-05">5 October 2026</time></p>
+    <p class="release-line">Latest release <span data-release-tag>v0.2.0</span>, <time data-release-date datetime="2026-10-15">15 October 2026</time></p>
     <p><a class="btn btn-primary" data-release-primary data-release-verb="Download" href="https://github.com/ZahakJ/jaunt/releases/latest">Download from the releases page</a></p>
     <ul class="assets" data-release-assets>
       <li><a href="https://github.com/ZahakJ/jaunt/releases/latest/download/jaunt-x86_64-linux-musl">Linux x86_64, static binary</a> <code>jaunt-x86_64-linux-musl</code></li>

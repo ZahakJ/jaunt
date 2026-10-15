@@ -17,6 +17,8 @@ jaunt gives a shell as you on every machine in the mesh.
 | a revoked or broken member stuffing the roster to block revocations | roster merges are bounded and take tombstones first |
 | other users on the same machine | key and socket are private (0600 in 0700 directories); the client checks the socket's owner; the pairing code is typed, not passed on the command line |
 | strings from other machines messing up your terminal | control characters are removed before printing |
+| a member pushing links, notifications or clipboard text | only `http` and `https` links open; notifications carry the sender's name; the clipboard is shared only where its owner turned sharing on, and never what a password manager marks secret ([per tool](tools.md#trust)) |
+| forwards reachable from the network | every local end (`fwd`, `open`, `socks`, and `rfwd` on the far side) listens on `127.0.0.1` only |
 | a laptop overheating in a bag | host mode only on mains and below the heat limit; anything unknown means sleep |
 
 ## What is not defended
@@ -25,7 +27,7 @@ jaunt gives a shell as you on every machine in the mesh.
 | --- | --- |
 | a stolen laptop that is unlocked and not yet revoked | it is a full member until you revoke it. Use disk encryption and a screen lock. The key file has no passphrase (the daemon must start unattended) |
 | a member that missed the revocation and cannot reach a machine that knows | when it is back it serves the revoked machine only if no machine that knows answered within 5 s of the revoked machine's first request, and then only until one becomes reachable (the revocation then ends its connections and processes). An outage shorter than a minute, with no sleep or freeze, does not count as an absence. `unlink` lists who has not heard |
-| a compromised member | trust is flat: it can reach every machine, link new ones and revoke the others. It can also fill the roster's entry limit (new links then fail until `jaunt reset`) and lie about which machines it added, so `--cascade` misses them |
+| a compromised member | trust is flat: it can reach every machine, read its open tabs and (where shared) its clipboard, link new ones and revoke the others. It can also fill the roster's entry limit (new links then fail until `jaunt reset`) and lie about which machines it added, so `--cascade` misses them |
 | traffic analysis | the relay and the network see who talks to whom, when and how much; the machine id is visible in the handshake, so an observer can recognise a machine across networks |
 | denial of service | the relay can drop traffic; anyone who knows the relay URL can block pairing (the pairing fails, nothing leaks) |
 | a tampered release | `install.sh` checks the binary only against a checksum from the same place; there is no signature |

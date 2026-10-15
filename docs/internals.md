@@ -54,6 +54,14 @@ service, non-member, not implemented, bad session name… all in words). Service
 | `exec {argv}` | `Data` (stdin c→h / stdout h→c), `Stderr` h→c, `Eof` c→h, final `Exit` |
 | `tcp {port}` | host connects to 127.0.0.1:port (then ::1) *before* replying (a closed port is a refusal in words); then `Data` both ways, `Eof` = half-close each way; a side finishes the stream only when both directions are done (`src/services/tcp.rs`) |
 | `copy {op: push\|pull, path}` | the sender (client for push, host for pull) sends `Json` messages tagged `m`: `plan {name, files, bytes}`, then per entry `entry {path, kind: file\|dir\|symlink, mode, size, mtime, target}` followed for a file by exactly `size` bytes of `Data`, `skip {path, reason}` for what it could not send, `done` (or `abort {reason}`); for a push the host answers `written {files, bytes}` or `abort` (`src/services/copy.rs`) |
+| `kill_sessions {of}` | host ends the tmux sessions those (revoked) machines created; `Json` count |
+| `tabs` | `Json` `[Tab {browser, title, url}]` from the browsers' session files (`src/services/tabs.rs`) |
+| `ports` | `Json` `[Port {port, bind, process, what}]`: listening TCP sockets loopback reaches (`src/services/ports.rs`) |
+| `open_url {url}` | host opens an `http(s)` URL in its browser; `Json` `null` |
+| `notify {title, body}` | host shows a notification titled `<sender> · <title>`; `Json` `null` |
+| `clip {op: get\|set}` | refused unless `clipboard = true` on the host. `get`: `Json` text. `set`: client sends the text as one `Json` frame, host answers `Json` `Reply` (`src/clipsync.rs`) |
+| `dial {host, port}` | as `tcp`, to any address the host reaches (`jaunt socks`) |
+| `listen {port, to}` | host listens on 127.0.0.1:port while the stream is open, and opens a `tcp {port: to}` stream back to the client for each connection (`jaunt rfwd`) |
 
 Copy receiving (`src/services/tree.rs`): entry paths are relative, `/`-separated, plain
 components only (no `..`, `.`, empty, absolute, NUL; ≤ 4096 bytes, ≤ 128 deep, ≤ 2 million
@@ -84,6 +92,10 @@ request per connection. Requests (`IpcRequest`, tagged by `op`):
 | `{"op":"set_relays","relays":["https://..."]}` | `ok` / `error` |
 | `{"op":"shutdown"}` | `ok`, then the daemon exits |
 | `{"op":"set_host","on":true}` | `ok`; host mode saved in config.toml and applied at once (`src/awake/`). `StatusSnapshot.host` is a `HostReport {state, reason, on_lid_close, lock_held, lid, power, hottest}`; `state` is `off`/`awake`/`on_battery`/`too_hot`/`will_sleep`, and peers get `HostState::label()` in `PingInfo.host` |
+| `{"op":"set_clipboard","on":true}` | `ok`; saved as `clipboard` in config.toml |
+| `{"op":"forward","machine":"b","port":8000,"local":0,"name":null,"keep":false}` | `{"kind":"forward", ...ForwardStatus}` once listening (`local` 0: the same port if free, else any); `keep` saves it as a `[[forward]]` table. `StatusSnapshot.forwards` lists them (`src/forwards.rs`) |
+| `{"op":"unforward","name":"site"}` | `ok` / `error`; by name or local port |
+| `{"op":"visitor"}` | `ok` with the name of the machine most recently hopped in whose shell is still open, else the last one that hopped in; `error` if none |
 
 | `{"op":"link","yes":false}` | a stream of `pair` updates (below); at step `confirm` the daemon waits for `{"op":"pair_answer","accept":true\|false}` on the same socket (not with `yes`); ends with `ok` or `error`. Closing the socket cancels |
 | `{"op":"join","code":"4127-tremor-kudos","relays":[...],"yes":false}` | same conversation as `link` |

@@ -583,6 +583,7 @@ mod tests {
             peers: vec![peer(2, "xylene", PeerState::Relay), peer(1, "toluene", PeerState::Direct)],
             revoked: vec![],
             host: None,
+            forwards: vec![],
         }
     }
 

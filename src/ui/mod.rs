@@ -7,6 +7,7 @@ pub(crate) mod bigtext;
 mod canvas;
 pub mod demo;
 mod input;
+pub mod picker;
 pub mod live;
 mod ls;
 pub(crate) mod mesh;
@@ -53,7 +54,37 @@ pub fn ls_plain(s: &StatusSnapshot, out: &mut impl Write) -> std::io::Result<()>
 pub fn ls_pretty(s: &StatusSnapshot, out: &mut impl Write) -> std::io::Result<()> {
     let mut m = model::Mesh::default();
     m.apply_status(s);
-    ls::print(&m, out)
+    ls::print(&m, out)?;
+    forwards(s, out)
+}
+
+/// The forwards the daemon holds, under the mesh: `name  127.0.0.1:local → machine:port`.
+fn forwards(s: &StatusSnapshot, out: &mut impl Write) -> std::io::Result<()> {
+    if s.forwards.is_empty() {
+        return Ok(());
+    }
+    writeln!(out, "  {}", paint("forwards", Style::fg(theme::VIOLET).bold()))?;
+    let w = s.forwards.iter().map(|f| f.name.chars().count()).max().unwrap_or(0);
+    for f in &s.forwards {
+        let state = match (&f.last_error, f.active) {
+            (Some(e), _) => paint(&canvas::clean(e), Style::fg(theme::AMBER)),
+            (None, 0) => String::new(),
+            (None, n) => paint(&format!("{n} open"), Style::fg(theme::GREEN)),
+        };
+        let keep = if f.keep { "" } else { " (until the daemon stops)" };
+        writeln!(
+            out,
+            "  {:<w$}  127.0.0.1:{:<5} {} {}:{}{}  {}",
+            canvas::clean(&f.name),
+            f.local,
+            glyphs().arrow,
+            canvas::clean(&f.machine),
+            f.port,
+            paint(keep, Style::fg(theme::DIM)),
+            state
+        )?;
+    }
+    Ok(())
 }
 
 fn path_style(path: PathKind) -> (char, Style) {

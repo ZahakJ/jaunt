@@ -124,6 +124,21 @@ async fn handle(d: Arc<Daemon>, mut s: UnixStream) -> Result<()> {
         }
         IpcRequest::Leave => crate::trust::serve_ipc(d, s, crate::trust::Request::Leave).await,
         IpcRequest::SetHost { on } => reply(&mut s, &result(d.set_host(on))).await,
+        IpcRequest::SetClipboard { on } => {
+            if on {
+                d.clip.baseline().await;
+            }
+            reply(&mut s, &result(d.set_clipboard(on))).await
+        }
+        IpcRequest::Visitor => reply(&mut s, &result(d.visitor())).await,
+        IpcRequest::Forward { machine, port, local, name, keep } => {
+            let r = match crate::forwards::add(&d, machine, port, local, name, keep).await {
+                Ok(f) => IpcResponse::Forward(f),
+                Err(e) => IpcResponse::Error { message: format!("{e:#}") },
+            };
+            reply(&mut s, &r).await
+        }
+        IpcRequest::Unforward { name } => reply(&mut s, &result(crate::forwards::remove(&d, &name))).await,
         IpcRequest::Check => reply(&mut s, &IpcResponse::Check(crate::check::report(&d).await)).await,
         IpcRequest::Quiet { id } => reply(&mut s, &IpcResponse::Quiet { quiet_ms: d.quiet_ms(&id) }).await,
         IpcRequest::Shutdown => {
@@ -311,7 +326,9 @@ pub fn clean_path(path: Option<&std::ffi::OsStr>) -> std::ffi::OsString {
 /// The environment a self-started daemon keeps: identity, locale, session plumbing that
 /// host mode needs (D-Bus, XDG), jaunt's own settings, and a cleaned PATH.
 pub fn daemon_env(vars: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
-    const KEEP: &[&str] = &["HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TZ", "DBUS_SESSION_BUS_ADDRESS", "TMUX_TMPDIR"];
+    const KEEP: &[&str] = &[
+        "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TZ", "DBUS_SESSION_BUS_ADDRESS", "TMUX_TMPDIR", "DISPLAY", "WAYLAND_DISPLAY",
+    ];
     let mut out = Vec::new();
     let mut path = None;
     for (k, v) in vars {

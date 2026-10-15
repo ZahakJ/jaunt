@@ -11,7 +11,7 @@ use crate::paths::{Paths, read_capped, write_private_atomic};
 const MAX_CONFIG: u64 = 64 * 1024;
 pub const DEFAULT_SESSION: &str = "jaunt";
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     /// This machine's name in the mesh (default: hostname, lowercased).
@@ -39,6 +39,46 @@ pub struct Config {
     /// Host mode (`jaunt host on|off`), see `src/awake/`.
     #[serde(skip_serializing_if = "HostConfig::is_default")]
     pub host: HostConfig,
+    /// Sessions jaunt starts send web URLs to the machine hopped in from, and see no
+    /// display here (as with ssh). `bridge_urls = false` turns both off.
+    #[serde(skip_serializing_if = "is_true")]
+    pub bridge_urls: bool,
+    /// Share the clipboard with linked machines that share theirs (`jaunt clip on`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub clipboard: bool,
+    /// Forwards the daemon holds open (`jaunt fwd --keep`), as `[[forward]]` tables.
+    #[serde(rename = "forward", skip_serializing_if = "Vec::is_empty")]
+    pub forwards: Vec<ForwardConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForwardConfig {
+    pub name: String,
+    pub machine: String,
+    pub port: u16,
+    pub local: u16,
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
+}
+
+impl Default for Config {
+    fn default() -> Config {
+        Config {
+            name: None,
+            relays: Vec::new(),
+            relay_ca: None,
+            default_session: None,
+            tmux_socket: None,
+            portmap: None,
+            port: None,
+            host: HostConfig::default(),
+            bridge_urls: true,
+            clipboard: false,
+            forwards: Vec::new(),
+        }
+    }
 }
 
 /// `[host]` in config.toml. Thresholds are optional overrides of the guard's defaults.

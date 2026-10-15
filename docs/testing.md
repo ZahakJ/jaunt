@@ -15,4 +15,7 @@ binary through link, join, hop, onward hop, run, cp, fwd, pipe with OpenSSH, unl
 lock-out, a revoked machine racing a frozen or disconnected one, direct and relayed paths,
 the relay going down, drops, roams, freezes, daemon restarts and latency. `08-nocontact.sh`
 checks from the routers that the daemon contacts nothing but the relay and its peers.
+`10-tools.sh` covers ports, tabs, send-tab, notify, clipboard sharing, socks, rfwd and held
+forwards, including a download through a forward while the client roams to another network
+and back, and forwards across daemon restarts on both ends.
 `09-latency.sh` writes keystroke round trips to [docs/measurements.md](https://github.com/ZahakJ/jaunt/blob/main/docs/measurements.md).

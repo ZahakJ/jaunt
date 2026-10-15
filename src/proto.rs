@@ -235,6 +235,67 @@ pub enum Service {
     KillSessions {
         of: Vec<crate::roster::MachineId>,
     },
+    /// The host's open browser tabs, read from the session files on disk. Reply is
+    /// followed by one `Json` frame with `Vec<Tab>`.
+    Tabs,
+    /// The host's listening TCP ports reachable on loopback. Reply, then `Vec<Port>`.
+    Ports,
+    /// Open an http(s) URL in the host's browser (`send-tab`, URL bridging).
+    OpenUrl { url: String },
+    /// A desktop notification on the host.
+    Notify { title: String, body: String },
+    /// The host's clipboard, if its owner turned clipboard sharing on. `Get`: the reply
+    /// is followed by one `Json` frame with the text. `Set`: after the reply the client
+    /// sends the text as one `Json` frame, and the host answers with a `Json` [`Reply`].
+    Clip { op: ClipOp },
+    /// Like `Tcp`, to any host and port the host can reach (`jaunt socks`).
+    Dial { host: String, port: u16 },
+    /// A reverse forward: the host listens on its loopback `port` for as long as this
+    /// stream stays open, and carries each connection back to the requester's loopback
+    /// `to` with a `Tcp` stream.
+    Listen { port: u16, to: u16 },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipOp {
+    Get,
+    Set,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Tab {
+    pub browser: String,
+    pub title: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Port {
+    pub port: u16,
+    /// `127.0.0.1`, `::1`, `0.0.0.0`, `::`.
+    pub bind: String,
+    /// Process name, when the socket belongs to this user.
+    #[serde(default)]
+    pub process: Option<String>,
+    /// A hint at what it is: the process's working directory name.
+    #[serde(default)]
+    pub what: Option<String>,
+}
+
+/// A forward the daemon holds (`jaunt fwd --keep`, `jaunt open`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ForwardStatus {
+    pub name: String,
+    pub machine: String,
+    pub port: u16,
+    pub local: u16,
+    /// Kept in config.toml and restarted with the daemon.
+    pub keep: bool,
+    /// Connections carried right now.
+    pub active: u32,
+    #[serde(default)]
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -352,6 +413,25 @@ pub enum IpcRequest {
     Quiet { id: crate::roster::MachineId },
     /// Turn host mode (§9) on or off; persisted in config.toml. -> `Ok`
     SetHost { on: bool },
+    /// Start a forward held by the daemon. `local` 0 = the same port if free, else any.
+    /// -> `Forward` with the port it listens on, or `Error`.
+    Forward {
+        machine: String,
+        port: u16,
+        #[serde(default)]
+        local: u16,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        keep: bool,
+    },
+    /// Stop a daemon-held forward by name or local port. -> `Ok`
+    Unforward { name: String },
+    /// Clipboard sharing on or off; persisted in config.toml. -> `Ok`
+    SetClipboard { on: bool },
+    /// The machine most recently hopped in here with a session still open. -> `Ok` with
+    /// its name, or `Error`.
+    Visitor,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -372,6 +452,7 @@ pub enum IpcResponse {
     Check(CheckReport),
     /// `quiet_ms`: since the last datagram from the peer; `None` without a live connection.
     Quiet { quiet_ms: Option<u64> },
+    Forward(ForwardStatus),
 }
 
 /// The daemon's view of the network, for `jaunt check`.
@@ -551,6 +632,8 @@ pub struct StatusSnapshot {
     /// This machine's host-mode guard (§9).
     #[serde(default)]
     pub host: Option<HostReport>,
+    #[serde(default)]
+    pub forwards: Vec<ForwardStatus>,
 }
 
 /// Host mode in one word, for `ls`, the mesh view and peers' `PingInfo::host`.

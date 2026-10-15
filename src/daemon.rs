@@ -106,6 +106,12 @@ pub struct Daemon {
     addrs: Mutex<crate::addrs::AddrBook>,
     /// Which machine created which tmux session here (persisted).
     tmux_owners: Mutex<BTreeMap<String, MachineId>>,
+    /// Forwards this daemon holds open.
+    pub forwards: crate::forwards::Forwards,
+    /// Clipboard sharing.
+    pub clip: crate::clipsync::ClipState,
+    /// Machines hopped in here right now, oldest first, and the last one that was.
+    hops: Mutex<(Vec<MachineId>, Option<MachineId>)>,
 }
 
 /// A machine that comes back from an absence (daemon start, a freeze or suspend, or no
@@ -353,6 +359,9 @@ pub async fn run(paths: Paths) -> Result<()> {
         settle: Settle::new(now_ms()),
         addrs: Mutex::new(addrs),
         tmux_owners: Mutex::new(tmux_owners),
+        forwards: Default::default(),
+        clip: Default::default(),
+        hops: Mutex::new((Vec::new(), None)),
     });
     d.note_own_port();
     d.events.emit(Some(d.me_ref()), EventKind::DaemonStarted { version: proto::VERSION.into() });
@@ -364,6 +373,8 @@ pub async fn run(paths: Paths) -> Result<()> {
     d.begin_round("daemon start");
     tokio::spawn(d.clone().monitor());
     tokio::spawn(ipc::serve(d.clone(), listener));
+    crate::forwards::start_kept(&d);
+    tokio::spawn(crate::clipsync::watch(d.clone()));
     systemd::notify("READY=1");
     {
         // With or without systemd, a stuck host-mode guard never keeps the lid lock.
@@ -430,6 +441,67 @@ impl Daemon {
 
     pub fn config(&self) -> Config {
         self.cfg.lock().map(|c| c.clone()).unwrap_or_default()
+    }
+
+    pub fn weak(&self) -> std::sync::Weak<Daemon> {
+        self.weak.clone()
+    }
+
+    /// Change config.toml and the daemon's copy together.
+    pub fn edit_config(&self, edit: impl FnOnce(&mut Config)) -> Result<()> {
+        let mut c = self.cfg.lock().map_err(|_| anyhow!("config lock poisoned"))?;
+        edit(&mut c);
+        c.save(&self.paths)
+    }
+
+    /// Members with a live connection right now.
+    pub fn live_peers(&self) -> Vec<MachineId> {
+        let g = self.peers.lock();
+        g.map(|g| {
+            g.iter()
+                .filter(|(id, p)| self.is_member(id) && p.conn.as_ref().is_some_and(|c| c.close_reason().is_none()))
+                .map(|(id, _)| *id)
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// The machine hopped in here most recently whose session is still open, else the
+    /// last one that hopped in at all (while it is still a member).
+    pub fn visitor(&self) -> Result<String> {
+        let g = self.hops.lock().map_err(|_| anyhow!("lock poisoned"))?;
+        let id = g.0.iter().rev().find(|id| self.is_member(id)).or(g.1.as_ref().filter(|id| self.is_member(id)));
+        match id {
+            Some(id) => Ok(self.name_of(id)),
+            None => bail!("no machine has hopped in here since the daemon started; name one"),
+        }
+    }
+
+    fn hop_started(&self, id: MachineId) {
+        if let Ok(mut g) = self.hops.lock() {
+            g.0.push(id);
+            g.1 = Some(id);
+        }
+    }
+
+    fn hop_ended(&self, id: MachineId) {
+        if let Ok(mut g) = self.hops.lock()
+            && let Some(i) = g.0.iter().rposition(|x| *x == id)
+        {
+            g.0.remove(i);
+        }
+    }
+
+    pub fn set_clipboard(&self, on: bool) -> Result<String> {
+        if on && crate::desktop::clip_tool_name().is_none() && !cfg!(target_os = "macos") {
+            bail!("no clipboard tool on {}: install wl-clipboard (Wayland) or xclip (X11)", self.my_name());
+        }
+        self.edit_config(|c| c.clipboard = on)?;
+        Ok(if on {
+            "clipboard sharing on: text copied here goes to linked machines that share theirs, and theirs comes here".into()
+        } else {
+            "clipboard sharing off".into()
+        })
     }
 
     pub fn is_member(&self, id: &MachineId) -> bool {
@@ -930,7 +1002,69 @@ impl Daemon {
                 self.events.emit(Some(self.peer_ref(&id)), EventKind::Served { service: "shell".into() });
                 self.note_tmux_creator(&session, id).await;
                 let req = shell::ShellRequest { session, term, cols, rows, env };
-                shell::serve(&self, id, req, send, recv).await
+                self.hop_started(id);
+                let r = shell::serve(&self, id, req, send, recv).await;
+                self.hop_ended(id);
+                r
+            }
+            Service::Tabs => {
+                self.events.emit(Some(self.peer_ref(&id)), EventKind::Served { service: "tabs".into() });
+                let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+                let tabs = tokio::task::spawn_blocking(move || services::tabs::read_all(&home)).await.unwrap_or_default();
+                reply_json(&mut send, &tabs).await
+            }
+            Service::Ports => {
+                self.events.emit(Some(self.peer_ref(&id)), EventKind::Served { service: "ports".into() });
+                let ports = services::ports::list().await;
+                reply_json(&mut send, &ports).await
+            }
+            Service::OpenUrl { url } => {
+                self.events.emit(Some(self.peer_ref(&id)), EventKind::Served { service: "open url".into() });
+                match crate::desktop::open_url(&url).await {
+                    Ok(()) => reply_json(&mut send, &()).await,
+                    Err(e) => self.refuse_logged(&id, &mut send, &format!("{e:#}")).await,
+                }
+            }
+            Service::Notify { title, body } => {
+                self.events.emit(Some(self.peer_ref(&id)), EventKind::Served { service: "notify".into() });
+                let title = format!("{} · {}", self.name_of(&id), crate::desktop::clean_line(&title, 100));
+                match crate::desktop::notify(&title, &body).await {
+                    Ok(()) => reply_json(&mut send, &()).await,
+                    Err(e) => refuse(&mut send, &format!("{e:#}")).await,
+                }
+            }
+            Service::Clip { op } => {
+                let what = if op == proto::ClipOp::Get { "clipboard read" } else { "clipboard write" };
+                self.events.emit(Some(self.peer_ref(&id)), EventKind::Served { service: what.into() });
+                if !self.config().clipboard {
+                    return refuse(&mut send, &format!("{} does not share its clipboard (jaunt clip on, there)", self.my_name())).await;
+                }
+                match op {
+                    proto::ClipOp::Get => match crate::desktop::clip_get().await {
+                        Ok(t) => reply_json(&mut send, &t.unwrap_or_default()).await,
+                        Err(e) => refuse(&mut send, &format!("{e:#}")).await,
+                    },
+                    proto::ClipOp::Set => {
+                        proto::write_json(&mut send, FrameType::Reply, &Reply::Ok).await?;
+                        let mut recv = recv;
+                        let payload = timeout(HEADER_TIMEOUT, proto::expect_frame(&mut recv, FrameType::Json)).await??;
+                        let text: String = proto::parse_json(&payload, MAX_FRAME)?;
+                        self.clip.note(&text);
+                        let done = match crate::desktop::clip_set(&text).await {
+                            Ok(()) => Reply::Ok,
+                            Err(e) => Reply::Refused { reason: format!("{e:#}") },
+                        };
+                        reply_json_only(&mut send, &done).await
+                    }
+                }
+            }
+            Service::Dial { host, port } => {
+                self.events.emit(Some(self.peer_ref(&id)), EventKind::Served { service: format!("socks {host}:{port}") });
+                services::tcp::serve_dial(&self, host, port, send, recv).await
+            }
+            Service::Listen { port, to } => {
+                self.events.emit(Some(self.peer_ref(&id)), EventKind::Served { service: format!("reverse forward {port}") });
+                services::tcp::serve_listen(&self, id, port, to, send, recv).await
             }
             Service::Exec { argv } => {
                 self.events.emit(Some(self.peer_ref(&id)), EventKind::Served { service: "exec".into() });
@@ -1520,6 +1654,7 @@ impl Daemon {
             peers,
             revoked,
             host: Some(self.host.report()),
+            forwards: self.forwards.list(),
         }
     }
 
@@ -1696,6 +1831,37 @@ async fn refuse(send: &mut SendStream, reason: &str) -> Result<()> {
     proto::write_json(send, FrameType::Reply, &Reply::Refused { reason: reason.to_string() }).await?;
     send.finish()?;
     Ok(())
+}
+
+/// `Reply::Ok`, one `Json` frame, and the end of the stream.
+async fn reply_json<T: serde::Serialize>(send: &mut SendStream, v: &T) -> Result<()> {
+    proto::write_json(send, FrameType::Reply, &Reply::Ok).await?;
+    proto::write_json(send, FrameType::Json, v).await?;
+    send.finish()?;
+    let _ = timeout(Duration::from_secs(2), send.stopped()).await;
+    Ok(())
+}
+
+/// One `Json` frame and the end of the stream (the `Reply` went out before).
+async fn reply_json_only<T: serde::Serialize>(send: &mut SendStream, v: &T) -> Result<()> {
+    proto::write_json(send, FrameType::Json, v).await?;
+    send.finish()?;
+    let _ = timeout(Duration::from_secs(2), send.stopped()).await;
+    Ok(())
+}
+
+/// Send clipboard text on a `Clip { op: Set }` stream whose reply was Ok, and read the result.
+pub async fn send_clip<W, R>(send: &mut W, recv: &mut R, text: &str) -> Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+    R: tokio::io::AsyncRead + Unpin,
+{
+    proto::write_json(send, FrameType::Json, &text).await?;
+    let done: Reply = proto::parse_json(&proto::expect_frame(recv, FrameType::Json).await?, MAX_HEADER)?;
+    match done {
+        Reply::Ok => Ok(()),
+        Reply::Refused { reason } => bail!("{}", crate::term::safe_text(&reason, 300, false)),
+    }
 }
 
 /// Open a stream, send the header, and wait for an Ok reply.

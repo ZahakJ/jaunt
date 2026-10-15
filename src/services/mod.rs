@@ -3,6 +3,8 @@
 //! so that revoking the peer ends it.
 
 pub mod copy;
+pub mod ports;
+pub mod tabs;
 pub mod tcp;
 mod tree;
 

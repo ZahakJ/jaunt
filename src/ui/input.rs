@@ -13,6 +13,10 @@ pub enum Key {
     Enter,
     Esc,
     CtrlC,
+    Backspace,
+    Tab,
+    /// Ctrl-A
+    All,
     Char(char),
 }
 
@@ -99,6 +103,9 @@ pub fn parse(b: &[u8]) -> Vec<Key> {
             0x1b => keys.push(Key::Esc),
             b'\r' | b'\n' => keys.push(Key::Enter),
             3 => keys.push(Key::CtrlC),
+            0x7f | 0x08 => keys.push(Key::Backspace),
+            b'\t' => keys.push(Key::Tab),
+            1 => keys.push(Key::All),
             c if c.is_ascii_graphic() || c == b' ' => keys.push(Key::Char(c as char)),
             _ => {}
         }
@@ -116,6 +123,6 @@ mod tests {
         assert_eq!(parse(b"\x1b[Ak\x1bOB\r"), vec![Key::Up, Key::Char('k'), Key::Down, Key::Enter]);
         assert_eq!(parse(b"\x1b"), vec![Key::Esc]);
         assert_eq!(parse(b"\x1b[1;5C\x03"), vec![Key::CtrlC]);
-        assert_eq!(parse(b"\x00\x7f"), vec![]);
+        assert_eq!(parse(b"\x00\x7f\t\x01"), vec![Key::Backspace, Key::Tab, Key::All]);
     }
 }

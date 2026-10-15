@@ -1,6 +1,6 @@
 [package]
 name = "jaunt"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 description = "Hop between your own machines over direct, end-to-end encrypted peer-to-peer links"
 license = "MIT"

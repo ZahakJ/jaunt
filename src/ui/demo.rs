@@ -110,6 +110,7 @@ fn snapshot() -> StatusSnapshot {
         ],
         revoked: vec![],
         host: None,
+        forwards: vec![],
     }
 }
 

@@ -143,6 +143,10 @@ pub async fn serve(d: &Arc<Daemon>, from: MachineId, req: ShellRequest, mut send
             if tmux_has_new_session_env(t) {
                 c.arg("-e").arg(format!("JAUNT_FROM={}", d.name_of(&from)));
                 c.arg("-e").arg(format!("JAUNT_MACHINE={me}"));
+                // URL bridging: web URLs opened in the session go to the visiting machine.
+                for (k, v) in crate::desktop::bridge_env(&d.paths, cfg.bridge_urls) {
+                    c.arg("-e").arg(format!("{k}={v}"));
+                }
             }
             c
         }
@@ -154,6 +158,7 @@ pub async fn serve(d: &Arc<Daemon>, from: MachineId, req: ShellRequest, mut send
             for k in STRIP_ENV {
                 c.env_remove(k);
             }
+            c.envs(crate::desktop::bridge_env(&d.paths, cfg.bridge_urls));
             c
         }
     };

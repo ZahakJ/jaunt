@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the harness e2e scripts (01-09) against one harness: up once, each script in turn,
+# Run the harness e2e scripts (01-10) against one harness: up once, each script in turn,
 # down at the end, then a summary. Each script takes the harness lock and releases it
 # when done; the harness stays up between scripts.
 #   JAUNT_BIN=target/release/jaunt test/e2e/run-all.sh [04 07 ...]   (default: all)
@@ -14,7 +14,7 @@ LOGS=$ROOT/target/tmp/run-all
 mkdir -p "$LOGS"
 want=("$@")
 scripts=()
-for s in "$E2E_DIR"/0[1-9]-*.sh; do
+for s in "$E2E_DIR"/[0-9][0-9]-*.sh; do
   n=$(basename "$s"); n=${n%%-*}
   if [ ${#want[@]} -eq 0 ] || printf '%s\n' "${want[@]}" | grep -qx "$n"; then scripts+=("$s"); fi
 done

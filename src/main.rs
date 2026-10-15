@@ -4,9 +4,13 @@ mod awake;
 mod check;
 mod addrs;
 mod children;
+mod cli_tools;
 mod cli_trust;
+mod clipsync;
 mod config;
 mod daemon;
+mod desktop;
+mod forwards;
 mod events;
 mod identity;
 mod ipc;
@@ -63,6 +67,9 @@ enum Cmd {
     /// Run one command on a machine: `jaunt run toluene -- uname -a`.
     Run {
         machine: String,
+        /// A desktop notification here when it ends.
+        #[arg(long)]
+        notify: bool,
         #[arg(last = true, required = true)]
         argv: Vec<String>,
     },
@@ -75,6 +82,78 @@ enum Cmd {
         machine: String,
         /// <port>[:<localport>]
         spec: String,
+        /// Hand it to the daemon: it returns at once, survives restarts and shows in `jaunt ls`.
+        #[arg(long)]
+        keep: bool,
+        /// Name for a kept forward (default machine:port).
+        #[arg(long, requires = "keep")]
+        name: Option<String>,
+    },
+    /// Stop a forward the daemon holds, by name or local port.
+    Unfwd { name: String },
+    /// Reverse forward (like ssh -R): `jaunt rfwd toluene 8080[:3000]` makes 127.0.0.1:8080
+    /// on toluene reach port 3000 here, while it runs.
+    Rfwd {
+        machine: String,
+        /// <port>[:<localport>]
+        spec: String,
+    },
+    /// A SOCKS5 proxy on 127.0.0.1 whose connections leave from the machine.
+    Socks {
+        machine: String,
+        #[arg(default_value_t = 1080)]
+        port: u16,
+    },
+    /// Forward a web port and open it in the browser here: `jaunt open toluene:7707[/path]`.
+    Open {
+        target: String,
+        /// Keep the forward across restarts.
+        #[arg(long)]
+        keep: bool,
+        /// Local port (default: the same one if free).
+        #[arg(long, default_value_t = 0)]
+        local: u16,
+    },
+    /// Listening ports on a machine's loopback; a key forwards one and opens it.
+    Ports {
+        machine: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// The machine's open browser tabs: pick some and open them here.
+    Tabs {
+        machine: String,
+        /// Open every tab without asking.
+        #[arg(long)]
+        all: bool,
+        /// Print them (browser, title, URL; tab-separated).
+        #[arg(long)]
+        list: bool,
+    },
+    /// Open URLs in a machine's browser: `jaunt send-tab toluene URL...`. Without a machine,
+    /// the one hopped in here.
+    SendTab {
+        #[arg(required = true, num_args = 1..)]
+        args: Vec<String>,
+    },
+    /// Clipboard: `on`/`off` shares it with linked machines that share theirs; `get` and
+    /// `set` read or write one machine's.
+    Clip {
+        #[command(subcommand)]
+        action: Option<ClipCmd>,
+    },
+    /// A desktop notification on the machine hopped in here: `make; jaunt notify built`.
+    Notify {
+        /// Another machine instead.
+        #[arg(long)]
+        to: Option<String>,
+        text: Vec<String>,
+    },
+    /// Session shim: web URLs to the machine hopped in, the rest to the real xdg-open.
+    #[command(hide = true, name = "xdg-open")]
+    XdgOpen {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// stdin/stdout to a machine's loopback port (default 22), for `ProxyCommand jaunt pipe %h`.
     Pipe {
@@ -173,6 +252,18 @@ enum Cmd {
 }
 
 #[derive(Subcommand)]
+enum ClipCmd {
+    /// Share this machine's clipboard (text only; never what a password manager marks secret).
+    On,
+    Off,
+    Status,
+    /// Print a machine's clipboard.
+    Get { machine: String },
+    /// Set a machine's clipboard from the arguments or stdin.
+    Set { machine: String, text: Vec<String> },
+}
+
+#[derive(Subcommand)]
 enum RelayCmd {
     /// Set the relay URL(s) for the whole mesh.
     Set {
@@ -200,6 +291,9 @@ enum DebugCmd {
     Id,
     /// Trust a machine without pairing (tests only).
     AddPeer { id: String, name: String },
+    /// What `jaunt tabs` and `jaunt ports` would find on this machine.
+    Tabs,
+    Ports,
     /// Print the daemon's status snapshot and then its event stream as JSON lines.
     Events {
         #[arg(long, default_value_t = 50)]
@@ -310,9 +404,42 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             }
             hop(&paths, &args[0]).await
         }
-        Some(Cmd::Run { machine, argv }) => services::run(&paths, &machine, argv).await,
+        Some(Cmd::Run { machine, notify, argv }) => {
+            let started = std::time::Instant::now();
+            let code = services::run(&paths, &machine, argv.clone()).await?;
+            if notify {
+                cli_tools::notify_local(&machine, &argv, code, started.elapsed()).await;
+            }
+            Ok(code)
+        }
         Some(Cmd::Cp { src, dst }) => services::copy::cp(&paths, &src, &dst).await,
-        Some(Cmd::Fwd { machine, spec }) => services::tcp::fwd(&paths, &machine, &spec).await,
+        Some(Cmd::Fwd { machine, spec, keep: true, name }) => cli_tools::fwd_keep(&paths, &machine, &spec, name).await,
+        Some(Cmd::Fwd { machine, spec, .. }) => services::tcp::fwd(&paths, &machine, &spec).await,
+        Some(Cmd::Unfwd { name }) => {
+            println!("{}", ipc::call_ok(&paths, &IpcRequest::Unforward { name }).await?);
+            Ok(0)
+        }
+        Some(Cmd::Rfwd { machine, spec }) => services::tcp::rfwd(&paths, &machine, &spec).await,
+        Some(Cmd::Socks { machine, port }) => services::tcp::socks(&paths, &machine, port).await,
+        Some(Cmd::Open { target, keep, local }) => cli_tools::open(&paths, &target, keep, local).await,
+        Some(Cmd::Ports { machine, json }) => cli_tools::ports(&paths, &machine, json).await,
+        Some(Cmd::Tabs { machine, all, list }) => cli_tools::tabs(&paths, &machine, all, list).await,
+        Some(Cmd::SendTab { args }) => cli_tools::send_tab(&paths, args).await,
+        Some(Cmd::XdgOpen { args }) => cli_tools::xdg_open(&paths, args).await,
+        Some(Cmd::Notify { to, text }) => cli_tools::notify(&paths, to, text).await,
+        Some(Cmd::Clip { action }) => match action {
+            None | Some(ClipCmd::Status) => cli_tools::clip_status(&paths).await,
+            Some(ClipCmd::On) => {
+                println!("{}", ipc::call_ok(&paths, &IpcRequest::SetClipboard { on: true }).await?);
+                Ok(0)
+            }
+            Some(ClipCmd::Off) => {
+                println!("{}", ipc::call_ok(&paths, &IpcRequest::SetClipboard { on: false }).await?);
+                Ok(0)
+            }
+            Some(ClipCmd::Get { machine }) => cli_tools::clip_get(&paths, &machine).await,
+            Some(ClipCmd::Set { machine, text }) => cli_tools::clip_set(&paths, &machine, text).await,
+        },
         Some(Cmd::Pipe { machine, port }) => {
             if port == 0 {
                 bail!("port 0 is not a port");
@@ -494,6 +621,17 @@ async fn debug(paths: &Paths, action: DebugCmd) -> Result<i32> {
         }
         DebugCmd::AddPeer { id, name } => {
             println!("{}", ipc::call_ok(paths, &IpcRequest::AddPeer { id, name }).await?);
+        }
+        DebugCmd::Tabs => {
+            let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+            for t in services::tabs::read_all(&home) {
+                println!("{}\t{}\t{}", t.browser, term::safe_text(&t.title, 300, false), t.url);
+            }
+        }
+        DebugCmd::Ports => {
+            for p in services::ports::list().await {
+                println!("{}\t{}\t{}\t{}", p.port, p.bind, p.process.unwrap_or_default(), p.what.unwrap_or_default());
+            }
         }
         DebugCmd::Events { history } => {
             let mut s = ipc::connect(paths).await?;

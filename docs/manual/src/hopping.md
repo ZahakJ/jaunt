@@ -43,7 +43,7 @@ A hop needs a terminal. To run something from a script, use `jaunt run`.
 | `jaunt fwd toluene 8080:9090` | the same, but here at port 9090 |
 | `jaunt pipe toluene [port]` | connect stdin and stdout to a port on toluene's loopback (default 22) |
 
-`fwd` reaches only toluene's loopback. The local end listens on `127.0.0.1`, so every user of this machine can use the port while it runs, as with `ssh -L`.
+`fwd` reaches only toluene's loopback. The local end listens on `127.0.0.1`, so every user of this machine can use the port while it runs, as with `ssh -L`. Held forwards, reverse forwards, a SOCKS proxy and `jaunt open`: [Ports, tabs and the clipboard](tools.md).
 
 `jaunt pipe` carries OpenSSH. Where sshd listens on loopback, this in `~/.ssh/config` sends `ssh`, `scp`, `rsync` and `git` through jaunt, with SSH's key check as a second layer:
 
